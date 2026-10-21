@@ -20,12 +20,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use accordion_core::identity::UsingAppPassword;
 use accordion_core::storage::{self, Item, ItemKind, Storage};
 use accordion_module::{ApiError, DavUser};
 use accordion_types::{ItemId, UserId};
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{OriginalUri, Request, State};
+use axum::extract::{FromRequestParts, OriginalUri, Request, State};
+use axum::http::header::AUTHORIZATION;
 use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use bytes::{Buf, Bytes};
@@ -67,8 +69,45 @@ pub(crate) fn routes(state: DriveState) -> Router {
 
 async fn serve(
     State(state): State<DriveState>,
-    DavUser(using): DavUser,
     OriginalUri(uri): OriginalUri,
+    request: Request,
+) -> Response {
+    if request.method() == Method::OPTIONS && !request.headers().contains_key(AUTHORIZATION) {
+        return discovery();
+    }
+    let (mut parts, body) = request.into_parts();
+    let using = match DavUser::from_request_parts(&mut parts, &state).await {
+        Ok(DavUser(using)) => using,
+        Err(rejection) => return rejection,
+    };
+    signed_in(state, using, uri, Request::from_parts(parts, body))
+        .await
+        .into_response()
+}
+
+/// Answers a client checking whether this is a WebDAV server. File Explorer
+/// on Windows asks before it sends a password, and gives up if the answer is
+/// "sign in first", so this answer doesn't need one. It says only what any
+/// Accordion server supports.
+fn discovery() -> Response {
+    (
+        [
+            ("DAV", "1,2,3"),
+            ("MS-Author-Via", "DAV"),
+            (
+                "Allow",
+                "OPTIONS,GET,HEAD,PUT,DELETE,PROPFIND,PROPPATCH,MKCOL,COPY,MOVE,LOCK,UNLOCK",
+            ),
+        ],
+        StatusCode::OK,
+    )
+        .into_response()
+}
+
+async fn signed_in(
+    state: DriveState,
+    using: UsingAppPassword,
+    uri: Uri,
     request: Request,
 ) -> Result<Response, ApiError> {
     let owner = using.user.id;

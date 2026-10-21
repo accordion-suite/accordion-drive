@@ -32,6 +32,34 @@ async fn needs_an_app_password() {
 }
 
 #[tokio::test]
+async fn answers_discovery_without_a_password() {
+    // File Explorer checks for WebDAV with OPTIONS before it sends a
+    // password, and gives up if the answer is 401.
+    let server = start().await;
+    let reply = server
+        .send("OPTIONS", "/dav/drive", &[], Body::empty())
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.headers["dav"], "1,2,3");
+    assert_eq!(reply.headers["ms-author-via"], "DAV");
+
+    // Everything else still needs one.
+    let reply = server
+        .send("PROPFIND", "/dav/drive", &[("depth", "0")], Body::empty())
+        .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    let reply = server
+        .send(
+            "OPTIONS",
+            "/dav/drive/",
+            &[("authorization", "Basic YWxleDp3cm9uZw==")],
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn saves_lists_and_reads_files() {
     let server = start().await;
     let alex = &server.alex;
