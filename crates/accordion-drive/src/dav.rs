@@ -11,6 +11,8 @@
 //! - **Deleting moves to the trash.** A folder goes to the trash whole, so
 //!   restoring it brings everything inside back. `dav-server` would delete
 //!   each file inside separately, so [`delete`] handles `DELETE` itself.
+//!   File Explorer deletes what's inside a folder first, so [`gather`] puts
+//!   that back into the folder before the folder goes.
 //! - **Locks always succeed.** Windows and macOS only write to servers that
 //!   support locks, but nothing here needs them: every save is kept as a
 //!   version, so two people saving at once can't lose either copy.
@@ -18,7 +20,7 @@
 use std::io::{self, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use accordion_core::identity::UsingAppPassword;
 use accordion_core::storage::{self, Item, ItemKind, Storage};
@@ -146,8 +148,45 @@ async fn delete(storage: &Storage, top: ItemId, uri: &Uri) -> Result<Response, A
         .find(top, names)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    if item.kind == ItemKind::Folder {
+        gather(storage, &item).await?;
+    }
     storage.delete(item.id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// How long before a folder is deleted that what's deleted from it counts
+/// as deleted along with it.
+const DELETED_TOGETHER: Duration = Duration::from_secs(10 * 60);
+
+/// File Explorer deletes a folder one item at a time, then deletes the empty
+/// folder. This puts back what was deleted from `folder` in the last few
+/// minutes, so the folder goes to the trash whole, and restoring it brings
+/// everything back. Items deleted earlier stay in the trash on their own,
+/// because someone chose to delete them separately.
+async fn gather(storage: &Storage, folder: &Item) -> Result<(), storage::Error> {
+    let now = SystemTime::now();
+    for item in storage.trash(folder.owner).await? {
+        let recent = item
+            .trashed_at
+            .as_deref()
+            .and_then(time::parse)
+            .is_some_and(|at| {
+                now.duration_since(at)
+                    .is_ok_and(|age| age <= DELETED_TOGETHER)
+                    || at >= now
+            });
+        if item.parent != Some(folder.id) || !recent {
+            continue;
+        }
+        match storage.restore(item.id).await {
+            // Something new has the name now, so the deleted item stays in
+            // the trash on its own.
+            Ok(_) | Err(storage::Error::NameTaken) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
 }
 
 /// The names along a path, such as `["Documents", "report.pdf"]` for

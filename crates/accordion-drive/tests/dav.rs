@@ -210,6 +210,90 @@ async fn deletes_folders_to_the_trash_whole() {
 }
 
 #[tokio::test]
+async fn keeps_folders_whole_when_file_explorer_deletes_them() {
+    let server = start().await;
+    let alex = &server.alex;
+    server.dav(alex, "MKCOL", "/Trip", &[], Body::empty()).await;
+    server
+        .dav(alex, "MKCOL", "/Trip/Day%201", &[], Body::empty())
+        .await;
+    for path in ["/Trip/a.jpg", "/Trip/b.jpg", "/Trip/Day%201/c.jpg"] {
+        server.dav(alex, "PUT", path, &[], "pixels").await;
+    }
+    // Deleted on its own, then replaced by a new a.jpg.
+    server
+        .dav(alex, "DELETE", "/Trip/a.jpg", &[], Body::empty())
+        .await;
+    server
+        .dav(alex, "PUT", "/Trip/a.jpg", &[], "new pixels")
+        .await;
+
+    // File Explorer deletes from the bottom up.
+    for path in [
+        "/Trip/Day%201/c.jpg",
+        "/Trip/Day%201",
+        "/Trip/a.jpg",
+        "/Trip/b.jpg",
+        "/Trip",
+    ] {
+        let reply = server.dav(alex, "DELETE", path, &[], Body::empty()).await;
+        assert_eq!(reply.status, StatusCode::NO_CONTENT, "{path}");
+    }
+    let mut trash: Vec<String> = server
+        .storage
+        .trash(alex.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|item| item.name)
+        .collect();
+    trash.sort();
+    assert_eq!(trash, ["Trip", "a.jpg"]);
+
+    let trip = server
+        .storage
+        .trash(alex.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|item| item.name == "Trip")
+        .unwrap();
+    server.storage.restore(trip.id).await.unwrap();
+    let top = server.storage.top_folder(alex.id).await.unwrap();
+    for path in [
+        &["Trip", "a.jpg"][..],
+        &["Trip", "b.jpg"],
+        &["Trip", "Day 1", "c.jpg"],
+    ] {
+        let names = path.iter().map(|name| name.to_string()).collect();
+        assert!(
+            server.storage.find(top, names).await.unwrap().is_some(),
+            "{path:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn keeps_one_version_of_a_file_from_file_explorer() {
+    let server = start().await;
+    let alex = &server.alex;
+    // File Explorer saves a new file empty, then saves the contents over
+    // it.
+    let reply = server.dav(alex, "PUT", "/photo.jpg", &[], "").await;
+    assert_eq!(reply.status, StatusCode::CREATED);
+    server.dav(alex, "PUT", "/photo.jpg", &[], "pixels").await;
+
+    let top = server.storage.top_folder(alex.id).await.unwrap();
+    let file = server
+        .storage
+        .find(top, vec!["photo.jpg".into()])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(server.storage.versions(file.id).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn keeps_nothing_from_a_cut_off_upload() {
     let server = start().await;
     let alex = &server.alex;

@@ -17,8 +17,8 @@ Drive keeps no files of its own. Core's storage service holds every file, versio
 
 A few things work differently from a plain file server:
 
-- **Deleting moves to the trash,** over WebDAV too. A deleted folder goes to the trash whole.
-- **Every save is a new version.** Saving part of a file isn't supported, so WebDAV requests that change only part of a file get `501 Not Implemented`.
+- **Deleting moves to the trash,** over WebDAV too. A deleted folder goes to the trash whole, even from File Explorer, which deletes what's inside a folder one item at a time first.
+- **Every save is a new version,** except that saving over an empty file replaces it. File Explorer saves each new file empty first. Saving part of a file isn't supported, so WebDAV requests that change only part of a file get `501 Not Implemented`.
 - **WebDAV locks always succeed.** Windows and macOS need lock support to save files, and versions keep every save, so two people saving at once can't lose either copy.
 
 ## Building
