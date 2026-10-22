@@ -50,6 +50,12 @@ use crate::{DriveState, time};
 /// Where the server mounts Drive's WebDAV routes (decision 7).
 const PREFIX: &str = "/dav/drive";
 
+/// How much of a file each read sends. dav-server's default is 16 KB, and
+/// each read is a trip to tokio's blocking threads, so downloads spent more
+/// time on the trips than on the data: 200 MB/s on a desktop, and far less on
+/// a Raspberry Pi. 256 KB reaches 1.3 GB/s, and larger reads were no faster.
+const READ_SIZE: usize = 256 * 1024;
+
 /// Who a request is for, found once per request.
 #[derive(Clone)]
 pub(crate) struct Credentials {
@@ -62,6 +68,7 @@ pub(crate) fn handler(storage: Storage) -> DavHandler<Credentials> {
         .filesystem(Box::new(DriveFs { storage }))
         .locksystem(FakeLs::new())
         .strip_prefix(PREFIX)
+        .read_buf_size(READ_SIZE)
         .build_handler()
 }
 
