@@ -217,6 +217,7 @@ fn fs_error(err: storage::Error) -> FsError {
         | TopFolder
         | MoveIntoItself
         | DifferentOwner
+        | GiveToSelf
         | InTrash
         | NotInTrash
         | UploadOffset { .. }
