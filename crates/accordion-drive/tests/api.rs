@@ -103,6 +103,81 @@ async fn manages_files_and_folders() {
 }
 
 #[tokio::test]
+async fn previews_images_and_pdfs() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut files = Vec::new();
+    for name in ["Beach.JPG", "Lease.pdf", "notes.txt", "logo.svg"] {
+        let file = server
+            .send(
+                "PUT",
+                &format!("/api/drive/items/{top}/children/{name}"),
+                &[("authorization", &alex.bearer)],
+                "contents",
+            )
+            .await
+            .json();
+        files.push((
+            file["id"].as_str().unwrap().to_owned(),
+            file["preview"].clone(),
+        ));
+    }
+    let previews: Vec<_> = files.iter().map(|(_, preview)| preview.clone()).collect();
+    assert_eq!(
+        previews,
+        [json!("image"), json!("pdf"), json!(null), json!(null)]
+    );
+    let top_folder = server.api(alex, "GET", "/top", None).await.json();
+    assert_eq!(top_folder["preview"], json!(null));
+
+    let image = server
+        .api(alex, "GET", &format!("/items/{}/preview", files[0].0), None)
+        .await;
+    assert_eq!(image.status, StatusCode::OK);
+    assert_eq!(image.text(), "contents");
+    assert_eq!(image.headers["content-type"], "image/jpeg");
+    assert_eq!(image.headers["x-content-type-options"], "nosniff");
+    assert_eq!(
+        image.headers["content-security-policy"],
+        "sandbox; frame-ancestors 'self'"
+    );
+    assert_eq!(
+        image.headers["content-disposition"],
+        "inline; filename=\"Beach.JPG\"; filename*=UTF-8''Beach.JPG"
+    );
+
+    let pdf = server
+        .api(alex, "GET", &format!("/items/{}/preview", files[1].0), None)
+        .await;
+    assert_eq!(pdf.status, StatusCode::OK);
+    assert_eq!(pdf.headers["content-type"], "application/pdf");
+    assert_eq!(pdf.headers["x-content-type-options"], "nosniff");
+    assert_eq!(
+        pdf.headers["content-security-policy"],
+        "frame-ancestors 'self'"
+    );
+
+    for (id, _) in &files[2..] {
+        let refused = server
+            .api(alex, "GET", &format!("/items/{id}/preview"), None)
+            .await;
+        assert_eq!(refused.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            refused.json()["error"],
+            "Accordion can't show this kind of file. Download it instead."
+        );
+    }
+    let folder = server
+        .api(alex, "GET", &format!("/items/{top}/preview"), None)
+        .await;
+    assert_eq!(folder.status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn keeps_versions() {
     let server = start().await;
     let alex = &server.alex;
@@ -304,6 +379,7 @@ async fn nobody_reaches_anyone_elses_files() {
     for (method, path, body) in [
         ("GET", format!("/items/{file}"), None),
         ("GET", format!("/items/{file}/content"), None),
+        ("GET", format!("/items/{file}/preview"), None),
         ("GET", format!("/items/{top}/children"), None),
         ("DELETE", format!("/items/{file}"), None),
         (

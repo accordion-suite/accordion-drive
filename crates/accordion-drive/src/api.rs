@@ -37,6 +37,7 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/items/{id}/children", get(children).post(create_folder))
         .route("/items/{id}/children/{name}", put(write_file))
         .route("/items/{id}/content", get(download))
+        .route("/items/{id}/preview", get(preview_file))
         .route("/items/{id}/restore", post(restore))
         .route("/items/{id}/versions", get(versions))
         .route(
@@ -70,6 +71,9 @@ struct ItemView {
     version: Option<VersionId>,
     size: Option<u64>,
     sha256: Option<String>,
+    /// For files the browser can show itself: "image" or "pdf". The web
+    /// app opens these from `/items/{id}/preview`.
+    preview: Option<&'static str>,
     created_at: String,
     modified_at: String,
     /// When it was deleted, if it's in the trash itself.
@@ -82,6 +86,10 @@ impl From<Item> for ItemView {
             ItemKind::Folder => ("folder", None, None),
             ItemKind::File { version, blob } => ("file", Some(version), Some(blob)),
         };
+        let preview = blob.and(preview(&item.name)).map(|preview| match preview {
+            Preview::Image(_) => "image",
+            Preview::Pdf => "pdf",
+        });
         Self {
             id: item.id,
             parent: item.parent,
@@ -90,6 +98,7 @@ impl From<Item> for ItemView {
             version,
             size: blob.map(|blob| blob.size),
             sha256: blob.map(|blob| blob.hash.to_hex()),
+            preview,
             created_at: item.created_at,
             modified_at: item.modified_at,
             trashed_at: item.trashed_at,
@@ -278,6 +287,34 @@ async fn download(
     file_response(&state, &item.name, blob).await
 }
 
+/// `GET /items/{id}/preview`: the file as a type the browser shows itself,
+/// for the kinds of file that `preview` allows.
+async fn preview_file(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path(id): Path<ItemId>,
+) -> Result<Response, ApiError> {
+    let item = state.owned(me.user.id, id).await?;
+    let ItemKind::File { blob, .. } = item.kind else {
+        return Err(storage::Error::NotAFile.into());
+    };
+    let (content_type, policy) = match preview(&item.name) {
+        Some(Preview::Image(content_type)) => (content_type, "sandbox; frame-ancestors 'self'"),
+        // Browsers show PDFs in their own viewers, which keep a PDF's
+        // scripts away from the page around it. Some of those viewers
+        // won't run in a sandbox, so PDFs go without one.
+        Some(Preview::Pdf) => ("application/pdf", "frame-ancestors 'self'"),
+        None => {
+            return Err(ApiError::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Accordion can't show this kind of file. Download it instead.",
+            ));
+        }
+    };
+    let disposition = disposition("inline", &item.name);
+    send_file(&state, blob, content_type, disposition, policy).await
+}
+
 /// `GET /items/{id}/versions`: every saved version of a file, newest first.
 async fn versions(
     State(state): State<DriveState>,
@@ -453,6 +490,35 @@ fn reader(body: Body) -> impl AsyncRead + Unpin + Send {
     StreamReader::new(body.into_data_stream().map_err(io::Error::other))
 }
 
+/// A kind of file the browser can show itself.
+enum Preview {
+    /// With its type, such as "image/png".
+    Image(&'static str),
+    Pdf,
+}
+
+/// Whether the browser can show a file, going by its name's extension.
+///
+/// The file is sent as exactly this type, and the browser is told not to
+/// guess another, so a file that isn't what its name says fails to show
+/// rather than running as something else. SVG images are left out because
+/// they can hold scripts, and HEIC photos because most browsers can't
+/// show them.
+fn preview(name: &str) -> Option<Preview> {
+    let (_, extension) = name.rsplit_once('.')?;
+    let image = match extension.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
+        "pdf" => return Some(Preview::Pdf),
+        _ => return None,
+    };
+    Some(Preview::Image(image))
+}
+
 /// Sends a file as a download.
 ///
 /// Files come from users, so a browser must never treat one as part of
@@ -460,28 +526,43 @@ fn reader(body: Body) -> impl AsyncRead + Unpin + Send {
 /// with the user's session. The headers make the browser save the file,
 /// stop it guessing the type, and sandbox it if it's shown anyway.
 async fn file_response(state: &DriveState, name: &str, blob: Blob) -> Result<Response, ApiError> {
+    let disposition = disposition("attachment", name);
+    send_file(
+        state,
+        blob,
+        "application/octet-stream",
+        disposition,
+        "sandbox",
+    )
+    .await
+}
+
+async fn send_file(
+    state: &DriveState,
+    blob: Blob,
+    content_type: &'static str,
+    disposition: HeaderValue,
+    policy: &'static str,
+) -> Result<Response, ApiError> {
     let file = state.storage.open_contents(blob.hash).await?;
     let mut headers = HeaderMap::new();
-    headers.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/octet-stream"),
-    );
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(CONTENT_LENGTH, HeaderValue::from(blob.size));
-    headers.insert(CONTENT_DISPOSITION, attachment(name));
+    headers.insert(CONTENT_DISPOSITION, disposition);
     headers.insert(
         ETAG,
         HeaderValue::try_from(format!("\"{}\"", blob.hash)).expect("hex is valid header text"),
     );
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
-    headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox"));
+    headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static(policy));
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
     Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
 }
 
-/// A `Content-Disposition` header that saves the file under its own name.
-/// `filename*` carries the exact name in any script (RFC 6266), and
+/// A `Content-Disposition` header, "attachment" or "inline", that names the
+/// file. `filename*` carries the exact name in any script (RFC 6266), and
 /// `filename` is a plain ASCII stand-in for clients that don't read it.
-fn attachment(name: &str) -> HeaderValue {
+fn disposition(kind: &str, name: &str) -> HeaderValue {
     let plain: String = name
         .chars()
         .map(|c| {
@@ -503,7 +584,7 @@ fn attachment(name: &str) -> HeaderValue {
         })
         .collect();
     HeaderValue::try_from(format!(
-        "attachment; filename=\"{plain}\"; filename*=UTF-8''{encoded}"
+        "{kind}; filename=\"{plain}\"; filename*=UTF-8''{encoded}"
     ))
     .expect("the name is ASCII once encoded")
 }
@@ -515,11 +596,11 @@ mod tests {
     #[test]
     fn attachments_keep_any_name() {
         assert_eq!(
-            attachment("report.pdf"),
+            disposition("attachment", "report.pdf"),
             "attachment; filename=\"report.pdf\"; filename*=UTF-8''report.pdf"
         );
         assert_eq!(
-            attachment("Ünïcode \"quoted\".txt"),
+            disposition("attachment", "Ünïcode \"quoted\".txt"),
             "attachment; filename=\"_n_code _quoted_.txt\"; \
              filename*=UTF-8''%C3%9Cn%C3%AFcode%20%22quoted%22.txt"
         );
