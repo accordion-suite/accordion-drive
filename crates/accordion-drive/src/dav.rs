@@ -189,7 +189,7 @@ async fn gather(storage: &Storage, folder: &Item) -> Result<(), storage::Error> 
         match storage.restore(item.id).await {
             // Something new has the name now, so the deleted item stays in
             // the trash on its own.
-            Ok(_) | Err(storage::Error::NameTaken) => {}
+            Ok(_) | Err(storage::Error::NameTaken { .. }) => {}
             Err(err) => return Err(err),
         }
     }
@@ -210,7 +210,7 @@ fn fs_error(err: storage::Error) -> FsError {
     use storage::Error::*;
     match err {
         NotFound | UserNotFound | UploadNotFound => FsError::NotFound,
-        NameTaken => FsError::Exists,
+        NameTaken { .. } => FsError::Exists,
         InvalidName
         | NotAFolder
         | NotAFile
