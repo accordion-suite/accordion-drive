@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "accordion-core"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#7588b2a970303046612e57c345269ea98d298aa2"
+source = "git+https://github.com/accordion-suite/accordion-core#7f657d58992d0143645e37651751974819d3f596"
 dependencies = [
  "accordion-types",
  "argon2",
@@ -49,7 +49,7 @@ dependencies = [
 [[package]]
 name = "accordion-module"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#7588b2a970303046612e57c345269ea98d298aa2"
+source = "git+https://github.com/accordion-suite/accordion-core#7f657d58992d0143645e37651751974819d3f596"
 dependencies = [
  "accordion-core",
  "accordion-types",
@@ -63,7 +63,7 @@ dependencies = [
 [[package]]
 name = "accordion-types"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#7588b2a970303046612e57c345269ea98d298aa2"
+source = "git+https://github.com/accordion-suite/accordion-core#7f657d58992d0143645e37651751974819d3f596"
 dependencies = [
  "serde",
  "uuid",

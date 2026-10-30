@@ -413,3 +413,249 @@ async fn nobody_reaches_anyone_elses_files() {
         .await;
     assert_eq!(signed_out.status, StatusCode::UNAUTHORIZED);
 }
+
+/// Saves `name` with `text` in `folder`, and returns its ID.
+async fn write(server: &common::Server, folder: &str, name: &str, text: &str) -> String {
+    let reply = server
+        .send(
+            "PUT",
+            &format!("/api/drive/items/{folder}/children/{name}"),
+            &[("authorization", &server.alex.bearer)],
+            text.to_owned(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    reply.json()["id"].as_str().unwrap().to_owned()
+}
+
+fn names(list: &serde_json::Value) -> Vec<String> {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            let mut path: Vec<String> = item["folders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|name| name.as_str().unwrap().to_owned())
+                .collect();
+            path.push(item["name"].as_str().unwrap().to_owned());
+            path.join("/")
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn stars_items() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let photos = server
+        .api(
+            alex,
+            "POST",
+            &format!("/items/{top}/children"),
+            Some(json!({ "name": "Photos" })),
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let beach = write(&server, &photos, "Beach.jpg", "sand").await;
+    let notes = write(&server, &top, "Notes.txt", "hi").await;
+
+    for id in [&beach, &photos, &notes] {
+        let reply = server
+            .api(alex, "PUT", &format!("/items/{id}/star"), None)
+            .await;
+        assert_eq!(reply.status, StatusCode::NO_CONTENT);
+        // Times count milliseconds, so this keeps the stars in order.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    // Starring twice changes nothing.
+    server
+        .api(alex, "PUT", &format!("/items/{beach}/star"), None)
+        .await;
+    let starred = server.api(alex, "GET", "/starred", None).await.json();
+    assert_eq!(names(&starred), ["Notes.txt", "Photos", "Photos/Beach.jpg"]);
+    assert_eq!(starred[0]["starred"], true);
+    let listed = server
+        .api(alex, "GET", &format!("/items/{top}/children"), None)
+        .await
+        .json();
+    assert!(
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["starred"] == true)
+    );
+
+    // A starred item in the trash leaves the list until it's restored.
+    server
+        .api(alex, "DELETE", &format!("/items/{photos}"), None)
+        .await;
+    assert_eq!(
+        names(&server.api(alex, "GET", "/starred", None).await.json()),
+        ["Notes.txt"]
+    );
+    server
+        .api(alex, "POST", &format!("/items/{photos}/restore"), None)
+        .await;
+    assert_eq!(
+        server
+            .api(alex, "GET", "/starred", None)
+            .await
+            .json()
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+
+    let reply = server
+        .api(alex, "DELETE", &format!("/items/{notes}/star"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    let item = server
+        .api(alex, "GET", &format!("/items/{notes}"), None)
+        .await
+        .json();
+    assert_eq!(item["starred"], false);
+
+    // Nobody else can star someone's items, or see their stars.
+    let reply = server
+        .api(&server.sam, "PUT", &format!("/items/{beach}/star"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    let theirs = server
+        .api(&server.sam, "GET", "/starred", None)
+        .await
+        .json();
+    assert!(theirs.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn lists_recent_files_and_searches() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let taxes = server
+        .api(
+            alex,
+            "POST",
+            &format!("/items/{top}/children"),
+            Some(json!({ "name": "Taxes" })),
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    write(&server, &taxes, "Return.pdf", "pdf").await;
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    write(&server, &top, "Tax%20notes.txt", "notes").await;
+
+    let recent = server.api(alex, "GET", "/recent", None).await.json();
+    assert_eq!(names(&recent), ["Tax notes.txt", "Taxes/Return.pdf"]);
+
+    let search = |query: &'static str| server.api(alex, "GET", query, None);
+    assert_eq!(
+        names(&search("/search?q=tax").await.json()),
+        ["Tax notes.txt", "Taxes"]
+    );
+    assert_eq!(
+        names(&search("/search?type=pdfs").await.json()),
+        ["Taxes/Return.pdf"]
+    );
+    assert_eq!(
+        names(&search("/search?q=tax&type=folders").await.json()),
+        ["Taxes"]
+    );
+    let later = search("/search?after=2999-01-01T00:00:00.000Z")
+        .await
+        .json();
+    assert!(later.as_array().unwrap().is_empty());
+    let earlier = search("/search?before=2999-01-01T00:00:00.000Z")
+        .await
+        .json();
+    assert_eq!(earlier.as_array().unwrap().len(), 3);
+
+    let reply = search("/search?type=spells").await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    let reply = search("/search?after=yesterday").await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    let theirs = server
+        .api(&server.sam, "GET", "/search?q=tax", None)
+        .await
+        .json();
+    assert!(theirs.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn copies_files() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let beach = write(&server, &top, "Beach.jpg", "sand").await;
+
+    let reply = server
+        .api(
+            alex,
+            "POST",
+            &format!("/items/{beach}/copy"),
+            Some(json!({ "name": "Copy of Beach.jpg" })),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text());
+    let copy = reply.json();
+    assert_eq!(copy["parent"], top.as_str());
+    assert_ne!(copy["id"], beach.as_str());
+    let content = server
+        .api(
+            alex,
+            "GET",
+            &format!("/items/{}/content", copy["id"].as_str().unwrap()),
+            None,
+        )
+        .await;
+    assert_eq!(content.text(), "sand");
+
+    let taken = server
+        .api(
+            alex,
+            "POST",
+            &format!("/items/{beach}/copy"),
+            Some(json!({ "name": "Beach.jpg" })),
+        )
+        .await;
+    assert_eq!(taken.status, StatusCode::CONFLICT);
+    let folder = server
+        .api(
+            alex,
+            "POST",
+            &format!("/items/{top}/copy"),
+            Some(json!({ "name": "Top" })),
+        )
+        .await;
+    assert_eq!(folder.status, StatusCode::CONFLICT);
+    let theirs = server
+        .api(
+            &server.sam,
+            "POST",
+            &format!("/items/{beach}/copy"),
+            Some(json!({ "name": "Mine.jpg" })),
+        )
+        .await;
+    assert_eq!(theirs.status, StatusCode::NOT_FOUND);
+}

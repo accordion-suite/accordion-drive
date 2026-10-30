@@ -3,14 +3,18 @@
 //!
 //! Items are files and folders, named by ID. Each request checks that the
 //! signed-in user owns what it names, and answers "not found" otherwise.
+//! Lists that reach across folders, such as search results, say where each
+//! item is, as the names of the folders it's in.
 
 use std::io;
 
-use accordion_core::storage::{self, Blob, Item, ItemKind, Upload, Usage, Version};
+use accordion_core::storage::{
+    self, Blob, Found, Item, ItemKind, Only, Search, Upload, Usage, Version,
+};
 use accordion_module::{ApiError, Authenticated};
 use accordion_types::{ItemId, UploadId, UserId, VersionId};
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::header::{
     CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_SECURITY_POLICY, CONTENT_TYPE,
     ETAG, X_CONTENT_TYPE_OPTIONS,
@@ -24,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncRead;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::DriveState;
+use crate::{DriveState, time};
 
 /// Says where a piece of a resumable upload starts. The name follows the
 /// tus protocol, which uses the same header for the same purpose.
@@ -39,6 +43,8 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/items/{id}/content", get(download))
         .route("/items/{id}/preview", get(preview_file))
         .route("/items/{id}/restore", post(restore))
+        .route("/items/{id}/star", put(star).delete(unstar))
+        .route("/items/{id}/copy", post(copy))
         .route("/items/{id}/versions", get(versions))
         .route(
             "/items/{id}/versions/{version}/content",
@@ -51,6 +57,9 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/trash", get(trash).delete(empty_trash))
         .route("/trash/{id}", delete(delete_forever))
         .route("/usage", get(usage))
+        .route("/recent", get(recent))
+        .route("/starred", get(starred))
+        .route("/search", get(search))
         .route("/uploads", post(start_upload))
         .route(
             "/uploads/{id}",
@@ -78,10 +87,12 @@ struct ItemView {
     modified_at: String,
     /// When it was deleted, if it's in the trash itself.
     trashed_at: Option<String>,
+    /// Whether the signed-in user starred it.
+    starred: bool,
 }
 
-impl From<Item> for ItemView {
-    fn from(item: Item) -> Self {
+impl ItemView {
+    fn new(item: Item, starred: bool) -> Self {
         let (kind, version, blob) = match item.kind {
             ItemKind::Folder => ("folder", None, None),
             ItemKind::File { version, blob } => ("file", Some(version), Some(blob)),
@@ -102,7 +113,56 @@ impl From<Item> for ItemView {
             created_at: item.created_at,
             modified_at: item.modified_at,
             trashed_at: item.trashed_at,
+            starred,
         }
+    }
+}
+
+/// An item in a list that reaches across folders.
+#[derive(Serialize)]
+struct FoundView {
+    #[serde(flatten)]
+    item: ItemView,
+    /// The names of the folders it's in, outermost first, not counting the
+    /// top folder.
+    folders: Vec<String>,
+}
+
+impl DriveState {
+    async fn view(&self, user: UserId, item: Item) -> Result<ItemView, ApiError> {
+        let starred = self.stars.set(user).await?.contains(&item.id);
+        Ok(ItemView::new(item, starred))
+    }
+
+    async fn views(&self, user: UserId, items: Vec<Item>) -> Result<Vec<ItemView>, ApiError> {
+        let stars = self.stars.set(user).await?;
+        Ok(items
+            .into_iter()
+            .map(|item| {
+                let starred = stars.contains(&item.id);
+                ItemView::new(item, starred)
+            })
+            .collect())
+    }
+
+    async fn found_views(
+        &self,
+        user: UserId,
+        found: Vec<Found>,
+    ) -> Result<Json<Vec<FoundView>>, ApiError> {
+        let stars = self.stars.set(user).await?;
+        Ok(Json(
+            found
+                .into_iter()
+                .map(|found| {
+                    let starred = stars.contains(&found.item.id);
+                    FoundView {
+                        item: ItemView::new(found.item, starred),
+                        folders: found.folders,
+                    }
+                })
+                .collect(),
+        ))
     }
 }
 
@@ -171,7 +231,7 @@ type ItemResult = Result<Json<ItemView>, ApiError>;
 async fn top(State(state): State<DriveState>, Authenticated(me): Authenticated) -> ItemResult {
     let id = state.storage.top_folder(me.user.id).await?;
     let item = state.owned(me.user.id, id).await?;
-    Ok(Json(item.into()))
+    Ok(Json(state.view(me.user.id, item).await?))
 }
 
 /// `GET /items/{id}`
@@ -180,7 +240,8 @@ async fn item(
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
 ) -> ItemResult {
-    Ok(Json(state.owned(me.user.id, id).await?.into()))
+    let item = state.owned(me.user.id, id).await?;
+    Ok(Json(state.view(me.user.id, item).await?))
 }
 
 /// `GET /items/{id}/children`: what's in a folder, sorted by name.
@@ -191,7 +252,7 @@ async fn children(
 ) -> Result<Json<Vec<ItemView>>, ApiError> {
     state.owned(me.user.id, id).await?;
     let children = state.storage.children(id).await?;
-    Ok(Json(children.into_iter().map(ItemView::from).collect()))
+    Ok(Json(state.views(me.user.id, children).await?))
 }
 
 #[derive(Deserialize)]
@@ -208,7 +269,10 @@ async fn create_folder(
 ) -> Result<(StatusCode, Json<ItemView>), ApiError> {
     state.owned(me.user.id, parent).await?;
     let folder = state.storage.create_folder(parent, &request.name).await?;
-    Ok((StatusCode::CREATED, Json(folder.into())))
+    Ok((
+        StatusCode::CREATED,
+        Json(state.view(me.user.id, folder).await?),
+    ))
 }
 
 /// `PUT /items/{id}/children/{name}`: saves the request body as a file, or
@@ -225,7 +289,7 @@ async fn write_file(
         .storage
         .write_file(parent, &name, reader(body))
         .await?;
-    Ok(Json(file.into()))
+    Ok(Json(state.view(me.user.id, file).await?))
 }
 
 #[derive(Deserialize)]
@@ -249,9 +313,8 @@ async fn move_item(
         None => item.parent.ok_or(storage::Error::TopFolder)?,
     };
     let name = request.name.unwrap_or(item.name);
-    Ok(Json(
-        state.storage.move_item(id, parent, &name).await?.into(),
-    ))
+    let moved = state.storage.move_item(id, parent, &name).await?;
+    Ok(Json(state.view(me.user.id, moved).await?))
 }
 
 /// `DELETE /items/{id}`: moves an item to the trash.
@@ -261,7 +324,8 @@ async fn trash_item(
     Path(id): Path<ItemId>,
 ) -> ItemResult {
     state.owned(me.user.id, id).await?;
-    Ok(Json(state.storage.delete(id).await?.into()))
+    let deleted = state.storage.delete(id).await?;
+    Ok(Json(state.view(me.user.id, deleted).await?))
 }
 
 /// `POST /items/{id}/restore`: takes an item out of the trash.
@@ -271,7 +335,208 @@ async fn restore(
     Path(id): Path<ItemId>,
 ) -> ItemResult {
     state.owned(me.user.id, id).await?;
-    Ok(Json(state.storage.restore(id).await?.into()))
+    let restored = state.storage.restore(id).await?;
+    Ok(Json(state.view(me.user.id, restored).await?))
+}
+
+/// `PUT /items/{id}/star`: stars an item.
+async fn star(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path(id): Path<ItemId>,
+) -> Result<StatusCode, ApiError> {
+    state.owned(me.user.id, id).await?;
+    state.stars.star(me.user.id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /items/{id}/star`: takes the star off an item.
+async fn unstar(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path(id): Path<ItemId>,
+) -> Result<StatusCode, ApiError> {
+    state.owned(me.user.id, id).await?;
+    state.stars.unstar(me.user.id, vec![id]).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct CopyRequest {
+    /// The folder to copy into. Leave it out for the same folder.
+    parent: Option<ItemId>,
+    /// The copy's name, such as "Copy of Beach.jpg". It can't be taken.
+    name: String,
+}
+
+/// `POST /items/{id}/copy`: copies a file. Folders can't be copied.
+async fn copy(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path(id): Path<ItemId>,
+    Json(request): Json<CopyRequest>,
+) -> Result<(StatusCode, Json<ItemView>), ApiError> {
+    let item = state.owned(me.user.id, id).await?;
+    let parent = match request.parent {
+        Some(parent) => state.owned(me.user.id, parent).await?.id,
+        None => item.parent.ok_or(storage::Error::NotAFile)?,
+    };
+    let copy = state.storage.copy_file(id, parent, &request.name).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(state.view(me.user.id, copy).await?),
+    ))
+}
+
+/// How many files **Recent** shows.
+const RECENT: usize = 100;
+
+/// The most results a search returns. Searching for more words narrows it.
+const SEARCH_LIMIT: usize = 200;
+
+/// `GET /recent`: the user's files outside the trash, most recently
+/// changed first.
+async fn recent(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+) -> Result<Json<Vec<FoundView>>, ApiError> {
+    let found = state.storage.recent(me.user.id, RECENT).await?;
+    state.found_views(me.user.id, found).await
+}
+
+/// `GET /starred`: what the user starred and isn't in the trash, most
+/// recently starred first.
+async fn starred(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+) -> Result<Json<Vec<FoundView>>, ApiError> {
+    let ids = state.stars.starred(me.user.id).await?;
+    let found = state.storage.live_items(ids.clone()).await?;
+    // Stars on items that were deleted for good are no use to anyone. Ones
+    // in the trash stay, for if they're restored.
+    let mut gone = Vec::new();
+    for id in ids {
+        if !found.iter().any(|found| found.item.id == id) && state.storage.item(id).await?.is_none()
+        {
+            gone.push(id);
+        }
+    }
+    if !gone.is_empty() {
+        state.stars.unstar(me.user.id, gone).await?;
+    }
+    let found = found
+        .into_iter()
+        .filter(|found| found.item.owner == me.user.id)
+        .collect();
+    state.found_views(me.user.id, found).await
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    /// Part of the name, ignoring case.
+    #[serde(default)]
+    q: String,
+    /// A kind of item: one of the names in [`TYPES`], or "folders".
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    /// Changed at or after this time, such as `2026-10-30T00:00:00.000Z`.
+    /// The web app works out times like the start of today in the reader's
+    /// own time zone, which the server doesn't know.
+    after: Option<String>,
+    /// Changed before this time.
+    before: Option<String>,
+}
+
+/// The kinds of file a search can look for, as Google Drive's type filter
+/// offers, by the extensions their names end in.
+const TYPES: &[(&str, &[&str])] = &[
+    (
+        "documents",
+        &["doc", "docx", "odt", "rtf", "txt", "md", "pages"],
+    ),
+    (
+        "spreadsheets",
+        &["xls", "xlsx", "ods", "csv", "tsv", "numbers"],
+    ),
+    ("presentations", &["ppt", "pptx", "odp", "key"]),
+    ("pdfs", &["pdf"]),
+    (
+        "photos",
+        &[
+            "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif", "bmp", "tif", "tiff",
+            "svg", "dng", "raw",
+        ],
+    ),
+    (
+        "videos",
+        &[
+            "mp4", "mov", "m4v", "mkv", "webm", "avi", "wmv", "3gp", "mts",
+        ],
+    ),
+    (
+        "audio",
+        &[
+            "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "wma", "aiff",
+        ],
+    ),
+    (
+        "archives",
+        &["zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz"],
+    ),
+];
+
+/// `GET /search?q=&type=&after=&before=`: the user's items outside the
+/// trash that match, most recently changed first.
+async fn search(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<Vec<FoundView>>, ApiError> {
+    let only =
+        match query.kind.as_deref() {
+            None | Some("") => None,
+            Some("folders") => Some(Only::Folders),
+            Some("files") => Some(Only::Files),
+            Some(kind) => {
+                let (_, extensions) = TYPES.iter().find(|(name, _)| *name == kind).ok_or_else(
+                    || {
+                        ApiError::new(
+                            StatusCode::BAD_REQUEST,
+                            format!(
+                                "Accordion doesn't know the type \"{kind}\". Choose another type."
+                            ),
+                        )
+                    },
+                )?;
+                Some(Only::Extensions(
+                    extensions
+                        .iter()
+                        .map(|&extension| extension.to_owned())
+                        .collect(),
+                ))
+            }
+        };
+    let search = Search {
+        text: query.q.trim().to_owned(),
+        only,
+        modified_since: checked_time(query.after)?,
+        modified_before: checked_time(query.before)?,
+        limit: SEARCH_LIMIT,
+    };
+    let found = state.storage.search(me.user.id, search).await?;
+    state.found_views(me.user.id, found).await
+}
+
+/// Storage compares times as text, so they have to be in its exact format,
+/// with milliseconds, as JavaScript's `toISOString` writes them.
+fn checked_time(time: Option<String>) -> Result<Option<String>, ApiError> {
+    match time {
+        Some(text) if text.len() != 24 || time::parse(&text).is_none() => Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Search times need to look like 2026-10-30T00:00:00.000Z, in UTC.",
+        )),
+        time => Ok(time),
+    }
 }
 
 /// `GET /items/{id}/content`: downloads the current version of a file.
@@ -349,9 +614,8 @@ async fn restore_version(
     Path((id, version)): Path<(ItemId, VersionId)>,
 ) -> ItemResult {
     state.owned(me.user.id, id).await?;
-    Ok(Json(
-        state.storage.restore_version(id, version).await?.into(),
-    ))
+    let restored = state.storage.restore_version(id, version).await?;
+    Ok(Json(state.view(me.user.id, restored).await?))
 }
 
 /// `GET /trash`: what the user has deleted, newest first.
@@ -360,7 +624,7 @@ async fn trash(
     Authenticated(me): Authenticated,
 ) -> Result<Json<Vec<ItemView>>, ApiError> {
     let items = state.storage.trash(me.user.id).await?;
-    Ok(Json(items.into_iter().map(ItemView::from).collect()))
+    Ok(Json(state.views(me.user.id, items).await?))
 }
 
 /// `DELETE /trash`: deletes everything in the trash for good.
@@ -463,7 +727,7 @@ async fn finish_upload(
         .storage
         .finish_upload(id, request.parent, &request.name)
         .await?;
-    Ok(Json(file.into()))
+    Ok(Json(state.view(me.user.id, file).await?))
 }
 
 /// `DELETE /uploads/{id}`: stops an upload and deletes what arrived.

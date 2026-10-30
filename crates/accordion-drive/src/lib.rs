@@ -9,6 +9,7 @@
 
 mod api;
 mod dav;
+mod stars;
 mod time;
 
 use std::sync::Arc;
@@ -39,7 +40,9 @@ impl Module for Drive {
         _stopping: Stopping,
     ) -> BoxFuture<Result<Started, StartError>> {
         Box::pin(async move {
+            services.db.migrate(stars::OWNER, stars::MIGRATIONS).await?;
             let state = DriveState {
+                stars: stars::Stars::new(services.db),
                 identity: services.identity,
                 dav: Arc::new(dav::handler(services.storage.clone())),
                 storage: services.storage,
@@ -59,6 +62,7 @@ impl Module for Drive {
 #[derive(Clone)]
 struct DriveState {
     identity: Identity,
+    stars: stars::Stars,
     storage: Storage,
     dav: Arc<dav_server::DavHandler<dav::Credentials>>,
 }
