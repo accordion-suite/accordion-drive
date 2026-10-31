@@ -13,9 +13,7 @@ use accordion_core::sql_now;
 use accordion_core::storage::Error;
 use accordion_types::{ItemId, UserId};
 
-pub(crate) const OWNER: &str = "drive";
-
-pub(crate) static MIGRATIONS: &[Migration] = &[Migration {
+pub(crate) const MIGRATION: Migration = Migration {
     version: 1,
     name: "Create stars",
     sql: "
@@ -26,7 +24,7 @@ pub(crate) static MIGRATIONS: &[Migration] = &[Migration {
         PRIMARY KEY (user_id, item_id)
     ) STRICT, WITHOUT ROWID;
     ",
-}];
+};
 
 #[derive(Clone)]
 pub(crate) struct Stars {

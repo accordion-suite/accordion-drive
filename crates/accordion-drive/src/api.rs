@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncRead;
 use tokio_util::io::{ReaderStream, StreamReader};
 
+use crate::settings::DriveSettings;
 use crate::{DriveState, time};
 
 /// Says where a piece of a resumable upload starts. The name follows the
@@ -60,6 +61,7 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/recent", get(recent))
         .route("/starred", get(starred))
         .route("/search", get(search))
+        .route("/settings", get(get_settings).put(put_settings))
         .route("/uploads", post(start_upload))
         .route(
             "/uploads/{id}",
@@ -337,6 +339,24 @@ async fn restore(
     state.owned(me.user.id, id).await?;
     let restored = state.storage.restore(id).await?;
     Ok(Json(state.view(me.user.id, restored).await?))
+}
+
+/// `GET /settings`: the signed-in person's Drive settings.
+async fn get_settings(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+) -> Result<Json<DriveSettings>, ApiError> {
+    Ok(Json(state.settings.get(me.user.id).await?))
+}
+
+/// `PUT /settings`: replaces them, so send every setting.
+async fn put_settings(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Json(settings): Json<DriveSettings>,
+) -> Result<StatusCode, ApiError> {
+    state.settings.set(me.user.id, settings).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// `PUT /items/{id}/star`: stars an item.

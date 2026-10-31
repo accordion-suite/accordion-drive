@@ -9,11 +9,13 @@
 
 mod api;
 mod dav;
+mod settings;
 mod stars;
 mod time;
 
 use std::sync::Arc;
 
+use accordion_core::db::Migration;
 use accordion_core::identity::Identity;
 use accordion_core::storage::{Item, Storage};
 use accordion_module::{
@@ -21,6 +23,13 @@ use accordion_module::{
 };
 use accordion_types::{ItemId, UserId};
 use axum::extract::FromRef;
+
+/// The name Drive's migrations are recorded under.
+const OWNER: &str = "drive";
+
+/// Drive's tables, in the order they were added. Each table's module has
+/// its own.
+static MIGRATIONS: &[Migration] = &[stars::MIGRATION, settings::MIGRATION];
 
 /// The Drive module. Add it to the server's list of modules.
 pub struct Drive;
@@ -40,9 +49,10 @@ impl Module for Drive {
         _stopping: Stopping,
     ) -> BoxFuture<Result<Started, StartError>> {
         Box::pin(async move {
-            services.db.migrate(stars::OWNER, stars::MIGRATIONS).await?;
+            services.db.migrate(OWNER, MIGRATIONS).await?;
             let state = DriveState {
-                stars: stars::Stars::new(services.db),
+                stars: stars::Stars::new(services.db.clone()),
+                settings: settings::Settings::new(services.db),
                 identity: services.identity,
                 dav: Arc::new(dav::handler(services.storage.clone())),
                 storage: services.storage,
@@ -63,6 +73,7 @@ impl Module for Drive {
 struct DriveState {
     identity: Identity,
     stars: stars::Stars,
+    settings: settings::Settings,
     storage: Storage,
     dav: Arc<dav_server::DavHandler<dav::Credentials>>,
 }

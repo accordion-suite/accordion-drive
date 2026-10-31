@@ -659,3 +659,46 @@ async fn copies_files() {
         .await;
     assert_eq!(theirs.status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn keeps_each_persons_settings() {
+    let server = start().await;
+    let (alex, sam) = (&server.alex, &server.sam);
+    let defaults = json!({ "start_page": "home", "thumbnails": true });
+    assert_eq!(
+        server.api(alex, "GET", "/settings", None).await.json(),
+        defaults
+    );
+
+    let changed = json!({ "start_page": "my-drive", "thumbnails": false });
+    let reply = server
+        .api(alex, "PUT", "/settings", Some(changed.clone()))
+        .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        server.api(alex, "GET", "/settings", None).await.json(),
+        changed
+    );
+    // Changing them again replaces the row rather than adding one.
+    let again = json!({ "start_page": "home", "thumbnails": false });
+    server
+        .api(alex, "PUT", "/settings", Some(again.clone()))
+        .await;
+    assert_eq!(
+        server.api(alex, "GET", "/settings", None).await.json(),
+        again
+    );
+    // Someone else's are their own.
+    assert_eq!(
+        server.api(sam, "GET", "/settings", None).await.json(),
+        defaults
+    );
+
+    for wrong in [
+        json!({ "start_page": "trash", "thumbnails": true }),
+        json!({ "start_page": "home" }),
+    ] {
+        let reply = server.api(alex, "PUT", "/settings", Some(wrong)).await;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+}
