@@ -7,6 +7,7 @@
 //! item is, as the names of the folders it's in.
 
 use std::io;
+use std::ops::Range;
 
 use accordion_core::storage::{
     self, Blob, Found, Item, ItemKind, Only, Search, Upload, Usage, Version,
@@ -17,8 +18,8 @@ use accordion_types::{ItemId, UploadId, UserId, VersionId};
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_SECURITY_POLICY, CONTENT_TYPE,
-    ETAG, X_CONTENT_TYPE_OPTIONS,
+    ACCEPT_RANGES, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
+    CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, IF_RANGE, RANGE, X_CONTENT_TYPE_OPTIONS,
 };
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -26,7 +27,7 @@ use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::settings::DriveSettings;
@@ -108,6 +109,7 @@ impl ItemView {
         let preview = blob.and(preview(&item.name)).map(|preview| match preview {
             Preview::Image(_) => "image",
             Preview::Pdf => "pdf",
+            Preview::Video(_) => "video",
         });
         let thumbnail = blob
             .and_then(|blob| thumbnails.find(blob.hash))
@@ -579,12 +581,13 @@ async fn download(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
+    request: HeaderMap,
 ) -> Result<Response, ApiError> {
     let item = state.owned(me.user.id, id).await?;
     let ItemKind::File { blob, .. } = item.kind else {
         return Err(storage::Error::NotAFile.into());
     };
-    file_response(&state, &item.name, blob).await
+    file_response(&state, &request, &item.name, blob).await
 }
 
 /// `GET /items/{id}/preview`: the file as a type the browser shows itself,
@@ -593,13 +596,16 @@ async fn preview_file(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
+    request: HeaderMap,
 ) -> Result<Response, ApiError> {
     let item = state.owned(me.user.id, id).await?;
     let ItemKind::File { blob, .. } = item.kind else {
         return Err(storage::Error::NotAFile.into());
     };
     let (content_type, policy) = match preview(&item.name) {
-        Some(Preview::Image(content_type)) => (content_type, "sandbox; frame-ancestors 'self'"),
+        Some(Preview::Image(content_type) | Preview::Video(content_type)) => {
+            (content_type, "sandbox; frame-ancestors 'self'")
+        }
         // Browsers show PDFs in their own viewers, which keep a PDF's
         // scripts away from the page around it. Some of those viewers
         // won't run in a sandbox, so PDFs go without one.
@@ -612,7 +618,7 @@ async fn preview_file(
         }
     };
     let disposition = disposition("inline", &item.name);
-    send_file(&state, blob, content_type, disposition, policy).await
+    send_file(&state, &request, blob, content_type, disposition, policy).await
 }
 
 /// `GET /items/{id}/thumbnail`: a small picture of the file's current
@@ -662,6 +668,7 @@ async fn download_version(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
     Path((id, version)): Path<(ItemId, VersionId)>,
+    request: HeaderMap,
 ) -> Result<Response, ApiError> {
     let item = state.owned(me.user.id, id).await?;
     let versions = state.storage.versions(id).await?;
@@ -669,7 +676,7 @@ async fn download_version(
         .into_iter()
         .find(|v| v.id == version)
         .ok_or_else(ApiError::not_found)?;
-    file_response(&state, &item.name, version.blob).await
+    file_response(&state, &request, &item.name, version.blob).await
 }
 
 /// `POST /items/{id}/versions/{version}/restore`: makes an older version
@@ -825,6 +832,8 @@ enum Preview {
     /// With its type, such as "image/png".
     Image(&'static str),
     Pdf,
+    /// With its type, such as "video/mp4".
+    Video(&'static str),
 }
 
 /// Whether a file's name lets it show as text: a document, a spreadsheet,
@@ -857,6 +866,12 @@ fn preview(name: &str) -> Option<Preview> {
         "avif" => "image/avif",
         "bmp" => "image/bmp",
         "pdf" => return Some(Preview::Pdf),
+        // QuickTime files are MP4's older form, and browsers that play one
+        // play the other when it's sent as MP4. Whether the video inside
+        // plays depends on the browser and the device, so the web app
+        // offers the download when it doesn't.
+        "mp4" | "m4v" | "mov" => return Some(Preview::Video("video/mp4")),
+        "webm" => return Some(Preview::Video("video/webm")),
         _ => return None,
     };
     Some(Preview::Image(image))
@@ -868,10 +883,16 @@ fn preview(name: &str) -> Option<Preview> {
 /// Accordion's own pages: a crafted HTML file could otherwise run scripts
 /// with the user's session. The headers make the browser save the file,
 /// stop it guessing the type, and sandbox it if it's shown anyway.
-async fn file_response(state: &DriveState, name: &str, blob: Blob) -> Result<Response, ApiError> {
+async fn file_response(
+    state: &DriveState,
+    request: &HeaderMap,
+    name: &str,
+    blob: Blob,
+) -> Result<Response, ApiError> {
     let disposition = disposition("attachment", name);
     send_file(
         state,
+        request,
         blob,
         "application/octet-stream",
         disposition,
@@ -880,26 +901,120 @@ async fn file_response(state: &DriveState, name: &str, blob: Blob) -> Result<Res
     .await
 }
 
+/// Sends a file, or the part a `Range` header asks for. Video players ask
+/// for parts to start playing and to skip ahead, and Safari plays no video
+/// without them. Downloads use them to pick up where they stopped.
 async fn send_file(
     state: &DriveState,
+    request: &HeaderMap,
     blob: Blob,
     content_type: &'static str,
     disposition: HeaderValue,
     policy: &'static str,
 ) -> Result<Response, ApiError> {
-    let file = state.storage.open_contents(blob.hash).await?;
+    let etag = format!("\"{}\"", blob.hash);
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
-    headers.insert(CONTENT_LENGTH, HeaderValue::from(blob.size));
     headers.insert(CONTENT_DISPOSITION, disposition);
     headers.insert(
         ETAG,
-        HeaderValue::try_from(format!("\"{}\"", blob.hash)).expect("hex is valid header text"),
+        HeaderValue::try_from(&etag).expect("hex is valid header text"),
     );
+    headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static(policy));
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
-    Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response())
+    let range = match requested_range(request, blob.size, &etag) {
+        Ok(range) => range,
+        Err(Unsatisfiable) => {
+            headers.insert(
+                CONTENT_RANGE,
+                HeaderValue::try_from(format!("bytes */{}", blob.size)).expect("digits are valid"),
+            );
+            return Ok((StatusCode::RANGE_NOT_SATISFIABLE, headers).into_response());
+        }
+    };
+    let mut file = state.storage.open_contents(blob.hash).await?;
+    let Some(range) = range else {
+        headers.insert(CONTENT_LENGTH, HeaderValue::from(blob.size));
+        return Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response());
+    };
+    file.seek(io::SeekFrom::Start(range.start))
+        .await
+        .map_err(storage::Error::from)?;
+    headers.insert(CONTENT_LENGTH, HeaderValue::from(range.end - range.start));
+    headers.insert(
+        CONTENT_RANGE,
+        HeaderValue::try_from(format!(
+            "bytes {}-{}/{}",
+            range.start,
+            range.end - 1,
+            blob.size
+        ))
+        .expect("digits are valid"),
+    );
+    let part = file.take(range.end - range.start);
+    Ok((
+        StatusCode::PARTIAL_CONTENT,
+        headers,
+        Body::from_stream(ReaderStream::new(part)),
+    )
+        .into_response())
+}
+
+/// A `Range` header that asks only for bytes past the end of the file.
+#[derive(Debug, PartialEq, Eq)]
+struct Unsatisfiable;
+
+/// The bytes a `Range` header asks for, out of a file of `size` bytes with
+/// `etag`. `None` means the whole file: there's no header, or one this
+/// doesn't serve, such as several ranges at once, or an `If-Range` for an
+/// older version (RFC 9110, section 14).
+fn requested_range(
+    request: &HeaderMap,
+    size: u64,
+    etag: &str,
+) -> Result<Option<Range<u64>>, Unsatisfiable> {
+    let Some(spec) = request
+        .get(RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().strip_prefix("bytes="))
+    else {
+        return Ok(None);
+    };
+    if request
+        .get(IF_RANGE)
+        .is_some_and(|value| value.as_bytes() != etag.as_bytes())
+    {
+        return Ok(None);
+    }
+    let Some((first, last)) = spec.trim().split_once('-') else {
+        return Ok(None);
+    };
+    let number = |text: &str| text.trim().parse::<u64>().ok();
+    let range = match (first.trim().is_empty(), last.trim().is_empty()) {
+        // "-500": the last 500 bytes.
+        (true, false) => match number(last) {
+            Some(0) => return Err(Unsatisfiable),
+            Some(count) => size.saturating_sub(count)..size,
+            None => return Ok(None),
+        },
+        // "500-": from byte 500 to the end.
+        (false, true) => match number(first) {
+            Some(start) => start..size,
+            None => return Ok(None),
+        },
+        // "500-999", which includes byte 999.
+        (false, false) => match (number(first), number(last)) {
+            (Some(start), Some(end)) if end >= start => start..size.min(end + 1),
+            _ => return Ok(None),
+        },
+        (true, true) => return Ok(None),
+    };
+    if range.start >= size {
+        return Err(Unsatisfiable);
+    }
+    Ok(Some(range))
 }
 
 /// A `Content-Disposition` header, "attachment" or "inline", that names the

@@ -103,7 +103,7 @@ async fn manages_files_and_folders() {
 }
 
 #[tokio::test]
-async fn previews_images_and_pdfs() {
+async fn previews_images_pdfs_and_videos() {
     let server = start().await;
     let alex = &server.alex;
     let top = server.api(alex, "GET", "/top", None).await.json()["id"]
@@ -111,7 +111,16 @@ async fn previews_images_and_pdfs() {
         .unwrap()
         .to_owned();
     let mut files = Vec::new();
-    for name in ["Beach.JPG", "Lease.pdf", "notes.txt", "logo.svg"] {
+    for name in [
+        "Beach.JPG",
+        "Lease.pdf",
+        "Holiday.MOV",
+        "Clip.webm",
+        "notes.txt",
+        "logo.svg",
+        // Browsers can't play a camcorder's files.
+        "Camcorder.mts",
+    ] {
         let file = server
             .send(
                 "PUT",
@@ -129,7 +138,15 @@ async fn previews_images_and_pdfs() {
     let previews: Vec<_> = files.iter().map(|(_, preview)| preview.clone()).collect();
     assert_eq!(
         previews,
-        [json!("image"), json!("pdf"), json!(null), json!(null)]
+        [
+            json!("image"),
+            json!("pdf"),
+            json!("video"),
+            json!("video"),
+            json!(null),
+            json!(null),
+            json!(null)
+        ]
     );
     let top_folder = server.api(alex, "GET", "/top", None).await.json();
     assert_eq!(top_folder["preview"], json!(null));
@@ -161,7 +178,25 @@ async fn previews_images_and_pdfs() {
         "frame-ancestors 'self'"
     );
 
-    for (id, _) in &files[2..] {
+    for (index, content_type) in [(2, "video/mp4"), (3, "video/webm")] {
+        let video = server
+            .api(
+                alex,
+                "GET",
+                &format!("/items/{}/preview", files[index].0),
+                None,
+            )
+            .await;
+        assert_eq!(video.status, StatusCode::OK);
+        assert_eq!(video.headers["content-type"], content_type);
+        assert_eq!(video.headers["accept-ranges"], "bytes");
+        assert_eq!(
+            video.headers["content-security-policy"],
+            "sandbox; frame-ancestors 'self'"
+        );
+    }
+
+    for (id, _) in &files[4..] {
         let refused = server
             .api(alex, "GET", &format!("/items/{id}/preview"), None)
             .await;
@@ -415,6 +450,72 @@ async fn nobody_reaches_anyone_elses_files() {
 }
 
 /// Saves `name` with `text` in `folder`, and returns its ID.
+#[tokio::test]
+async fn sends_the_part_of_a_file_a_player_asks_for() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let id = write(&server, &top, "digits.txt", "0123456789").await;
+    let etag = server
+        .api(alex, "GET", &format!("/items/{id}/content"), None)
+        .await
+        .headers["etag"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let get = |range: &'static str, if_range: Option<String>| {
+        let path = format!("/api/drive/items/{id}/content");
+        let server = &server;
+        async move {
+            let mut headers = vec![("authorization", alex.bearer.as_str()), ("range", range)];
+            let if_range = if_range.unwrap_or_default();
+            if !if_range.is_empty() {
+                headers.push(("if-range", &if_range));
+            }
+            server.send("GET", &path, &headers, "").await
+        }
+    };
+
+    for (range, part, content_range) in [
+        ("bytes=2-5", "2345", "bytes 2-5/10"),
+        ("bytes=7-", "789", "bytes 7-9/10"),
+        ("bytes=-3", "789", "bytes 7-9/10"),
+        // Past the end is cut to the end.
+        ("bytes=8-100", "89", "bytes 8-9/10"),
+        ("bytes=-100", "0123456789", "bytes 0-9/10"),
+    ] {
+        let reply = get(range, None).await;
+        assert_eq!(reply.status, StatusCode::PARTIAL_CONTENT, "{range}");
+        assert_eq!(reply.text(), part, "{range}");
+        assert_eq!(reply.headers["content-range"], content_range, "{range}");
+        assert_eq!(reply.headers["content-length"], part.len().to_string());
+    }
+
+    let reply = get("bytes=10-", None).await;
+    assert_eq!(reply.status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(reply.headers["content-range"], "bytes */10");
+
+    // Several ranges at once, nonsense, and a range of an older version
+    // get the whole file.
+    for (range, if_range) in [
+        ("bytes=0-1,4-5", None),
+        ("bytes=5-2", None),
+        ("lines=1-2", None),
+        ("bytes=2-5", Some("\"an older version\"".to_owned())),
+    ] {
+        let reply = get(range, if_range).await;
+        assert_eq!(reply.status, StatusCode::OK, "{range}");
+        assert_eq!(reply.text(), "0123456789", "{range}");
+        assert_eq!(reply.headers["accept-ranges"], "bytes");
+    }
+    let reply = get("bytes=2-5", Some(etag)).await;
+    assert_eq!(reply.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(reply.text(), "2345");
+}
+
 async fn write(server: &common::Server, folder: &str, name: &str, text: &str) -> String {
     let reply = server
         .send(
