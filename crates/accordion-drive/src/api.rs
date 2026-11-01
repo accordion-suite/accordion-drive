@@ -11,7 +11,7 @@ use std::io;
 use accordion_core::storage::{
     self, Blob, Found, Item, ItemKind, Only, Search, Upload, Usage, Version,
 };
-use accordion_core::thumbnails::Thumbnails;
+use accordion_core::thumbnails::{ThumbnailKind, Thumbnails};
 use accordion_module::{ApiError, Authenticated};
 use accordion_types::{ItemId, UploadId, UserId, VersionId};
 use axum::body::Body;
@@ -87,9 +87,10 @@ struct ItemView {
     /// For files the browser can show itself: "image" or "pdf". The web
     /// app opens these from `/items/{id}/preview`.
     preview: Option<&'static str>,
-    /// Whether `/items/{id}/thumbnail` has a small picture of the file yet.
-    /// Core makes them in the background, so a new photo gets one soon.
-    thumbnail: bool,
+    /// What `/items/{id}/thumbnail` has for the file yet: "picture", a small
+    /// WebP, or "text", its first lines. Core makes them in the background,
+    /// so a new photo gets one soon.
+    thumbnail: Option<&'static str>,
     created_at: String,
     modified_at: String,
     /// When it was deleted, if it's in the trash itself.
@@ -108,6 +109,14 @@ impl ItemView {
             Preview::Image(_) => "image",
             Preview::Pdf => "pdf",
         });
+        let thumbnail = blob
+            .and_then(|blob| thumbnails.find(blob.hash))
+            .and_then(|thumbnail| match thumbnail.kind {
+                ThumbnailKind::Picture => Some("picture"),
+                // A song or a video that happens to be text, such as a
+                // placeholder, would look broken as a page of text.
+                ThumbnailKind::Text => text_kind(&item.name).then_some("text"),
+            });
         Self {
             id: item.id,
             parent: item.parent,
@@ -117,7 +126,7 @@ impl ItemView {
             size: blob.map(|blob| blob.size),
             sha256: blob.map(|blob| blob.hash.to_hex()),
             preview,
-            thumbnail: blob.is_some_and(|blob| thumbnails.find(blob.hash).is_some()),
+            thumbnail,
             created_at: item.created_at,
             modified_at: item.modified_at,
             trashed_at: item.trashed_at,
@@ -607,9 +616,9 @@ async fn preview_file(
 }
 
 /// `GET /items/{id}/thumbnail`: a small picture of the file's current
-/// version, as WebP, for the grid. The web app adds the version's hash to
-/// the address, such as `?v=3f9a…`, so browsers can keep each one for a
-/// year.
+/// version, as WebP, or a text file's first lines, as UTF-8, for the grid.
+/// The web app adds the version's hash to the address, such as `?v=3f9a…`,
+/// so browsers can keep each one for a year.
 async fn thumbnail(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
@@ -620,18 +629,21 @@ async fn thumbnail(
         return Err(storage::Error::NotAFile.into());
     };
     let none = || ApiError::new(StatusCode::NOT_FOUND, "This file doesn't have a thumbnail.");
-    let path = state.thumbnails.find(blob.hash).ok_or_else(none)?;
+    let found = state.thumbnails.find(blob.hash).ok_or_else(none)?;
     // Thumbnails of contents that are gone are removed now and then.
-    let webp = tokio::fs::read(path).await.map_err(|_| none())?;
+    let thumbnail = tokio::fs::read(found.path).await.map_err(|_| none())?;
     let mut headers = HeaderMap::new();
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("image/webp"));
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static(found.kind.content_type()),
+    );
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox"));
     headers.insert(
         CACHE_CONTROL,
         HeaderValue::from_static("private, max-age=31536000, immutable"),
     );
-    Ok((headers, webp).into_response())
+    Ok((headers, thumbnail).into_response())
 }
 
 /// `GET /items/{id}/versions`: every saved version of a file, newest first.
@@ -813,6 +825,19 @@ enum Preview {
     /// With its type, such as "image/png".
     Image(&'static str),
     Pdf,
+}
+
+/// Whether a file's name lets it show as text: a document, a spreadsheet,
+/// or a type Accordion doesn't know, such as code.
+fn text_kind(name: &str) -> bool {
+    let Some((_, extension)) = name.rsplit_once('.') else {
+        return true;
+    };
+    let extension = extension.to_ascii_lowercase();
+    TYPES
+        .iter()
+        .find(|(_, extensions)| extensions.contains(&extension.as_str()))
+        .is_none_or(|(kind, _)| matches!(*kind, "documents" | "spreadsheets"))
 }
 
 /// Whether the browser can show a file, going by its name's extension.

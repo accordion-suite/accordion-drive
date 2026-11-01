@@ -732,7 +732,7 @@ async fn sends_thumbnails_once_core_makes_them() {
     let notes = write(&server, &top, "notes.txt", "Pick up the bread.").await;
 
     // Core hasn't made it yet.
-    assert_eq!(photo["thumbnail"], json!(false));
+    assert_eq!(photo["thumbnail"], json!(null));
     let reply = server
         .api(alex, "GET", &format!("/items/{id}/thumbnail"), None)
         .await;
@@ -745,7 +745,7 @@ async fn sends_thumbnails_once_core_makes_them() {
         .api(alex, "GET", &format!("/items/{id}"), None)
         .await
         .json();
-    assert_eq!(item["thumbnail"], json!(true));
+    assert_eq!(item["thumbnail"], json!("picture"));
     let reply = server
         .api(alex, "GET", &format!("/items/{id}/thumbnail"), None)
         .await;
@@ -757,7 +757,7 @@ async fn sends_thumbnails_once_core_makes_them() {
     );
     assert_eq!(&reply.body[8..12], b"WEBP");
 
-    // Lists say so too, and other files and folders have none.
+    // Lists say so too, and files core hasn't reached have none yet.
     let children = server
         .api(alex, "GET", &format!("/items/{top}/children"), None)
         .await
@@ -771,14 +771,45 @@ async fn sends_thumbnails_once_core_makes_them() {
     assert_eq!(
         has,
         [
-            (json!("beach.jpg"), json!(true)),
-            (json!("notes.txt"), json!(false))
+            (json!("beach.jpg"), json!("picture")),
+            (json!("notes.txt"), json!(null))
         ]
     );
     let reply = server
         .api(alex, "GET", &format!("/items/{notes}/thumbnail"), None)
         .await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
+
+    // A text file's thumbnail is its first lines, as text.
+    let item = server
+        .api(alex, "GET", &format!("/items/{notes}"), None)
+        .await
+        .json();
+    let hash =
+        accordion_core::storage::ContentHash::from_hex(item["sha256"].as_str().unwrap()).unwrap();
+    assert!(server.thumbnails.make_now(hash).await.unwrap());
+    let reply = server
+        .api(alex, "GET", &format!("/items/{notes}/thumbnail"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.headers["content-type"], "text/plain; charset=utf-8");
+    assert_eq!(reply.headers["content-security-policy"], "sandbox");
+    assert_eq!(&reply.body[..], b"Pick up the bread.");
+
+    // Unless its name says it's something else, such as a song.
+    let song = write(&server, &top, "song.mp3", "Not really a song.").await;
+    let item = server
+        .api(alex, "GET", &format!("/items/{song}"), None)
+        .await
+        .json();
+    let hash =
+        accordion_core::storage::ContentHash::from_hex(item["sha256"].as_str().unwrap()).unwrap();
+    assert!(server.thumbnails.make_now(hash).await.unwrap());
+    let item = server
+        .api(alex, "GET", &format!("/items/{song}"), None)
+        .await
+        .json();
+    assert_eq!(item["thumbnail"], json!(null));
 
     // Nobody else reaches it.
     let reply = server
