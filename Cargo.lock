@@ -5,8 +5,9 @@ version = 4
 [[package]]
 name = "accordion-core"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#f87454bfd6692ccba00feb5a41983e51df7b79c6"
+source = "git+https://github.com/accordion-suite/accordion-core#205b5108b7f1336f5fbf68d2a3f2784f25c9799f"
 dependencies = [
+ "accordion-sandbox",
  "accordion-types",
  "argon2",
  "base64ct",
@@ -17,6 +18,7 @@ dependencies = [
  "rustls",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -30,6 +32,7 @@ version = "0.1.0"
 dependencies = [
  "accordion-core",
  "accordion-module",
+ "accordion-sandbox",
  "accordion-types",
  "axum",
  "base64ct",
@@ -49,7 +52,7 @@ dependencies = [
 [[package]]
 name = "accordion-module"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#f87454bfd6692ccba00feb5a41983e51df7b79c6"
+source = "git+https://github.com/accordion-suite/accordion-core#205b5108b7f1336f5fbf68d2a3f2784f25c9799f"
 dependencies = [
  "accordion-core",
  "accordion-types",
@@ -61,9 +64,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "accordion-sandbox"
+version = "0.1.0"
+source = "git+https://github.com/accordion-suite/accordion-core#205b5108b7f1336f5fbf68d2a3f2784f25c9799f"
+dependencies = [
+ "landlock",
+ "libc",
+ "seccompiler",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "accordion-types"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#f87454bfd6692ccba00feb5a41983e51df7b79c6"
+source = "git+https://github.com/accordion-suite/accordion-core#205b5108b7f1336f5fbf68d2a3f2784f25c9799f"
 dependencies = [
  "serde",
  "uuid",
@@ -416,6 +431,26 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
+name = "enumflags2"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
+dependencies = [
+ "enumflags2_derive",
+]
+
+[[package]]
+name = "enumflags2_derive"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "errno"
@@ -878,6 +913,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "landlock"
+version = "0.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cca98e95f35b29d469dade6724c6f96cec9236640f745a0e99b0334ec320ab1"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1151,6 +1197,15 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "seccompiler"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "serde"

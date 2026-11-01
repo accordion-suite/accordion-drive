@@ -6,9 +6,16 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# The sandbox launcher on its own, for the thumbnail tests.
+[[bin]]
+name = "accordion-drive-sandbox"
+path = "src/bin/sandbox.rs"
+test = false
+
 [dependencies]
 accordion-core = { git = "https://github.com/accordion-suite/accordion-core", version = "0.1.0" }
 accordion-module = { git = "https://github.com/accordion-suite/accordion-core", version = "0.1.0" }
+accordion-sandbox = { git = "https://github.com/accordion-suite/accordion-core", version = "0.1.0" }
 accordion-types = { git = "https://github.com/accordion-suite/accordion-core", version = "0.1.0" }
 axum = "0.8.9"
 bytes = "1.12.1"

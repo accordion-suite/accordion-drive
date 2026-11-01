@@ -702,3 +702,87 @@ async fn keeps_each_persons_settings() {
         assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
+
+#[tokio::test]
+async fn sends_thumbnails_once_core_makes_them() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // A real photo, made with libvips outside the sandbox.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("beach.jpg");
+    let made = std::process::Command::new("vips")
+        .args(["xyz", path.to_str().unwrap(), "1600", "1200"])
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let photo = server
+        .send(
+            "PUT",
+            &format!("/api/drive/items/{top}/children/beach.jpg"),
+            &[("authorization", &alex.bearer)],
+            std::fs::read(&path).unwrap(),
+        )
+        .await
+        .json();
+    let id = photo["id"].as_str().unwrap().to_owned();
+    let notes = write(&server, &top, "notes.txt", "Pick up the bread.").await;
+
+    // Core hasn't made it yet.
+    assert_eq!(photo["thumbnail"], json!(false));
+    let reply = server
+        .api(alex, "GET", &format!("/items/{id}/thumbnail"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+
+    let hash =
+        accordion_core::storage::ContentHash::from_hex(photo["sha256"].as_str().unwrap()).unwrap();
+    assert!(server.thumbnails.make_now(hash).await.unwrap());
+    let item = server
+        .api(alex, "GET", &format!("/items/{id}"), None)
+        .await
+        .json();
+    assert_eq!(item["thumbnail"], json!(true));
+    let reply = server
+        .api(alex, "GET", &format!("/items/{id}/thumbnail"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.headers["content-type"], "image/webp");
+    assert_eq!(
+        reply.headers["cache-control"],
+        "private, max-age=31536000, immutable"
+    );
+    assert_eq!(&reply.body[8..12], b"WEBP");
+
+    // Lists say so too, and other files and folders have none.
+    let children = server
+        .api(alex, "GET", &format!("/items/{top}/children"), None)
+        .await
+        .json();
+    let has: Vec<_> = children
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| (item["name"].clone(), item["thumbnail"].clone()))
+        .collect();
+    assert_eq!(
+        has,
+        [
+            (json!("beach.jpg"), json!(true)),
+            (json!("notes.txt"), json!(false))
+        ]
+    );
+    let reply = server
+        .api(alex, "GET", &format!("/items/{notes}/thumbnail"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+
+    // Nobody else reaches it.
+    let reply = server
+        .api(&server.sam, "GET", &format!("/items/{id}/thumbnail"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+}

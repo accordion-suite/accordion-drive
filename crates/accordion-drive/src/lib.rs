@@ -18,6 +18,7 @@ use std::sync::Arc;
 use accordion_core::db::Migration;
 use accordion_core::identity::Identity;
 use accordion_core::storage::{Item, Storage};
+use accordion_core::thumbnails::Thumbnails;
 use accordion_module::{
     ApiError, BoxFuture, Module, Routes, Services, StartError, Started, Stopping,
 };
@@ -56,6 +57,7 @@ impl Module for Drive {
                 identity: services.identity,
                 dav: Arc::new(dav::handler(services.storage.clone())),
                 storage: services.storage,
+                thumbnails: services.thumbnails,
             };
             Ok(Started {
                 routes: Routes {
@@ -75,6 +77,7 @@ struct DriveState {
     stars: stars::Stars,
     settings: settings::Settings,
     storage: Storage,
+    thumbnails: Thumbnails,
     dav: Arc<dav_server::DavHandler<dav::Credentials>>,
 }
 

@@ -11,6 +11,7 @@ use std::io;
 use accordion_core::storage::{
     self, Blob, Found, Item, ItemKind, Only, Search, Upload, Usage, Version,
 };
+use accordion_core::thumbnails::Thumbnails;
 use accordion_module::{ApiError, Authenticated};
 use accordion_types::{ItemId, UploadId, UserId, VersionId};
 use axum::body::Body;
@@ -43,6 +44,7 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/items/{id}/children/{name}", put(write_file))
         .route("/items/{id}/content", get(download))
         .route("/items/{id}/preview", get(preview_file))
+        .route("/items/{id}/thumbnail", get(thumbnail))
         .route("/items/{id}/restore", post(restore))
         .route("/items/{id}/star", put(star).delete(unstar))
         .route("/items/{id}/copy", post(copy))
@@ -85,6 +87,9 @@ struct ItemView {
     /// For files the browser can show itself: "image" or "pdf". The web
     /// app opens these from `/items/{id}/preview`.
     preview: Option<&'static str>,
+    /// Whether `/items/{id}/thumbnail` has a small picture of the file yet.
+    /// Core makes them in the background, so a new photo gets one soon.
+    thumbnail: bool,
     created_at: String,
     modified_at: String,
     /// When it was deleted, if it's in the trash itself.
@@ -94,7 +99,7 @@ struct ItemView {
 }
 
 impl ItemView {
-    fn new(item: Item, starred: bool) -> Self {
+    fn new(item: Item, starred: bool, thumbnails: &Thumbnails) -> Self {
         let (kind, version, blob) = match item.kind {
             ItemKind::Folder => ("folder", None, None),
             ItemKind::File { version, blob } => ("file", Some(version), Some(blob)),
@@ -112,6 +117,7 @@ impl ItemView {
             size: blob.map(|blob| blob.size),
             sha256: blob.map(|blob| blob.hash.to_hex()),
             preview,
+            thumbnail: blob.is_some_and(|blob| thumbnails.find(blob.hash).is_some()),
             created_at: item.created_at,
             modified_at: item.modified_at,
             trashed_at: item.trashed_at,
@@ -133,7 +139,7 @@ struct FoundView {
 impl DriveState {
     async fn view(&self, user: UserId, item: Item) -> Result<ItemView, ApiError> {
         let starred = self.stars.set(user).await?.contains(&item.id);
-        Ok(ItemView::new(item, starred))
+        Ok(ItemView::new(item, starred, &self.thumbnails))
     }
 
     async fn views(&self, user: UserId, items: Vec<Item>) -> Result<Vec<ItemView>, ApiError> {
@@ -142,7 +148,7 @@ impl DriveState {
             .into_iter()
             .map(|item| {
                 let starred = stars.contains(&item.id);
-                ItemView::new(item, starred)
+                ItemView::new(item, starred, &self.thumbnails)
             })
             .collect())
     }
@@ -159,7 +165,7 @@ impl DriveState {
                 .map(|found| {
                     let starred = stars.contains(&found.item.id);
                     FoundView {
-                        item: ItemView::new(found.item, starred),
+                        item: ItemView::new(found.item, starred, &self.thumbnails),
                         folders: found.folders,
                     }
                 })
@@ -598,6 +604,34 @@ async fn preview_file(
     };
     let disposition = disposition("inline", &item.name);
     send_file(&state, blob, content_type, disposition, policy).await
+}
+
+/// `GET /items/{id}/thumbnail`: a small picture of the file's current
+/// version, as WebP, for the grid. The web app adds the version's hash to
+/// the address, such as `?v=3f9a…`, so browsers can keep each one for a
+/// year.
+async fn thumbnail(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path(id): Path<ItemId>,
+) -> Result<Response, ApiError> {
+    let item = state.owned(me.user.id, id).await?;
+    let ItemKind::File { blob, .. } = item.kind else {
+        return Err(storage::Error::NotAFile.into());
+    };
+    let none = || ApiError::new(StatusCode::NOT_FOUND, "This file doesn't have a thumbnail.");
+    let path = state.thumbnails.find(blob.hash).ok_or_else(none)?;
+    // Thumbnails of contents that are gone are removed now and then.
+    let webp = tokio::fs::read(path).await.map_err(|_| none())?;
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("image/webp"));
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox"));
+    headers.insert(
+        CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=31536000, immutable"),
+    );
+    Ok((headers, webp).into_response())
 }
 
 /// `GET /items/{id}/versions`: every saved version of a file, newest first.

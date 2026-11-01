@@ -6,6 +6,7 @@
 use accordion_core::db::Database;
 use accordion_core::identity::{AppPasswordUse, AuthMethod, Client, Identity, NewUser};
 use accordion_core::storage::Storage;
+use accordion_core::thumbnails::{Thumbnails, Tools};
 use accordion_drive::Drive;
 use accordion_module::{Module, Services, Stopping};
 use accordion_types::{Role, UserId};
@@ -23,6 +24,7 @@ pub struct Server {
     _stop: watch::Sender<bool>,
     pub router: Router,
     pub storage: Storage,
+    pub thumbnails: Thumbnails,
     pub alex: Person,
     pub sam: Person,
 }
@@ -64,6 +66,16 @@ pub async fn start() -> Server {
     let storage = Storage::open(db.clone(), identity.clone(), &dir.path().join("storage"))
         .await
         .unwrap();
+    // Thumbnails are made only when a test asks, with the real programs in
+    // the sandbox.
+    let thumbnails = Thumbnails::open(
+        db.clone(),
+        storage.clone(),
+        dir.path(),
+        Tools::installed(env!("CARGO_BIN_EXE_accordion-drive-sandbox")),
+    )
+    .await
+    .unwrap();
     let (stop, stopping) = watch::channel(false);
     let started = Drive
         .start(
@@ -71,6 +83,7 @@ pub async fn start() -> Server {
                 db,
                 identity: identity.clone(),
                 storage: storage.clone(),
+                thumbnails: thumbnails.clone(),
             },
             Stopping::new(stopping),
         )
@@ -86,6 +99,7 @@ pub async fn start() -> Server {
         _stop: stop,
         router,
         storage,
+        thumbnails,
     }
 }
 
