@@ -8,6 +8,7 @@
 //! arrives.
 
 mod api;
+mod archive;
 mod dav;
 mod settings;
 mod stars;

@@ -31,7 +31,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::settings::DriveSettings;
-use crate::{DriveState, time};
+use crate::{DriveState, archive, time};
 
 /// Says where a piece of a resumable upload starts. The name follows the
 /// tus protocol, which uses the same header for the same purpose.
@@ -64,6 +64,7 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/recent", get(recent))
         .route("/starred", get(starred))
         .route("/search", get(search))
+        .route("/zip", get(zip_download))
         .route("/settings", get(get_settings).put(put_settings))
         .route("/uploads", post(start_upload))
         .route(
@@ -653,6 +654,70 @@ async fn thumbnail(
         HeaderValue::from_static("private, max-age=31536000, immutable"),
     );
     Ok((headers, thumbnail).into_response())
+}
+
+#[derive(Deserialize)]
+struct ZipQuery {
+    /// Item IDs, separated by commas.
+    ids: String,
+}
+
+/// `GET /zip?ids=…`: a folder, or several items, as one ZIP file, built as
+/// it's sent.
+async fn zip_download(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Query(query): Query<ZipQuery>,
+) -> Result<Response, ApiError> {
+    let ids = query
+        .ids
+        .split(',')
+        .filter(|id| !id.is_empty())
+        .map(|id| {
+            ItemId::deserialize(
+                serde::de::value::StrDeserializer::<serde::de::value::Error>::new(id),
+            )
+            .map_err(|_| ApiError::not_found())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Choose what to download, then try again.",
+        ));
+    }
+    // Items in the trash, or someone else's, are as good as missing.
+    let wanted = ids.len();
+    let items: Vec<Item> = state
+        .storage
+        .live_items(ids)
+        .await?
+        .into_iter()
+        .map(|found| found.item)
+        .filter(|item| item.owner == me.user.id)
+        .collect();
+    if items.len() != wanted {
+        return Err(ApiError::not_found());
+    }
+    let name = match items.as_slice() {
+        [folder] if folder.kind == ItemKind::Folder => format!("{}.zip", folder.name),
+        _ => "Drive download.zip".to_owned(),
+    };
+    let hold = state.storage.hold_contents().await;
+    let entries = archive::entries(&state.storage, items).await?;
+    // A few chunks ahead of the browser at most, so memory stays small.
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    tokio::task::spawn_blocking(move || archive::write(entries, hold, sender));
+    let body = futures_util::stream::unfold(receiver, |mut receiver| async move {
+        receiver.recv().await.map(|chunk| (chunk, receiver))
+    });
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/zip"));
+    headers.insert(CONTENT_DISPOSITION, disposition("attachment", &name));
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox"));
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok((headers, Body::from_stream(body)).into_response())
 }
 
 /// `GET /items/{id}/versions`: every saved version of a file, newest first.

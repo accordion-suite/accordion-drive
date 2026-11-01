@@ -518,6 +518,110 @@ async fn sends_the_part_of_a_file_a_player_asks_for() {
     assert_eq!(reply.text(), "2345");
 }
 
+#[tokio::test]
+async fn downloads_folders_and_selections_as_a_zip() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let folder = |parent: String, name: &'static str| {
+        let server = &server;
+        async move {
+            server
+                .api(
+                    alex,
+                    "POST",
+                    &format!("/items/{parent}/children"),
+                    Some(json!({ "name": name })),
+                )
+                .await
+                .json()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let trip = folder(top.clone(), "Trip").await;
+    let photos = folder(trip.clone(), "Photos").await;
+    folder(trip.clone(), "Empty").await;
+    let notes = write(&server, &trip, "notes.txt", "Pack the tent.").await;
+    write(&server, &photos, "lake.txt", "A photo of the lake.").await;
+    let other_notes = write(&server, &top, "notes.txt", "Pick up the bread.").await;
+
+    let zip = |ids: String| {
+        let server = &server;
+        async move {
+            server
+                .api(alex, "GET", &format!("/zip?ids={ids}"), None)
+                .await
+        }
+    };
+    let read = |body: &[u8]| {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(body.to_vec())).unwrap();
+        (0..archive.len())
+            .map(|index| {
+                let mut entry = archive.by_index(index).unwrap();
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut entry, &mut text).unwrap();
+                (entry.name().unwrap().into_owned(), text)
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // A folder, with everything in it, under its own name.
+    let reply = zip(trip.clone()).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.headers["content-type"], "application/zip");
+    assert_eq!(
+        reply.headers["content-disposition"],
+        "attachment; filename=\"Trip.zip\"; filename*=UTF-8''Trip.zip"
+    );
+    assert_eq!(
+        read(&reply.body),
+        [
+            ("Trip/".to_owned(), String::new()),
+            ("Trip/Empty/".to_owned(), String::new()),
+            ("Trip/Photos/".to_owned(), String::new()),
+            ("Trip/notes.txt".to_owned(), "Pack the tent.".to_owned()),
+            (
+                "Trip/Photos/lake.txt".to_owned(),
+                "A photo of the lake.".to_owned()
+            ),
+        ]
+    );
+
+    // Two files with the same name, from different folders.
+    let reply = zip(format!("{notes},{other_notes}")).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(
+        reply.headers["content-disposition"],
+        "attachment; filename=\"Drive download.zip\"; filename*=UTF-8''Drive%20download.zip"
+    );
+    assert_eq!(
+        read(&reply.body),
+        [
+            ("notes.txt".to_owned(), "Pack the tent.".to_owned()),
+            ("notes (1).txt".to_owned(), "Pick up the bread.".to_owned()),
+        ]
+    );
+
+    // Nobody else's files, nothing at all, or nonsense.
+    let reply = server
+        .api(&server.sam, "GET", &format!("/zip?ids={trip}"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert_eq!(zip(String::new()).await.status, StatusCode::BAD_REQUEST);
+    assert_eq!(zip("not-an-id".into()).await.status, StatusCode::NOT_FOUND);
+
+    // Nor what's in the trash.
+    server
+        .api(alex, "DELETE", &format!("/items/{trip}"), None)
+        .await;
+    assert_eq!(zip(notes).await.status, StatusCode::NOT_FOUND);
+}
+
 async fn write(server: &common::Server, folder: &str, name: &str, text: &str) -> String {
     let reply = server
         .send(
