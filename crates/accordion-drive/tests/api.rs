@@ -103,7 +103,7 @@ async fn manages_files_and_folders() {
 }
 
 #[tokio::test]
-async fn previews_images_pdfs_and_videos() {
+async fn previews_what_browsers_show_themselves() {
     let server = start().await;
     let alex = &server.alex;
     let top = server.api(alex, "GET", "/top", None).await.json()["id"]
@@ -116,6 +116,7 @@ async fn previews_images_pdfs_and_videos() {
         "Lease.pdf",
         "Holiday.MOV",
         "Clip.webm",
+        "Song.mp3",
         "notes.txt",
         "logo.svg",
         // Browsers can't play a camcorder's files.
@@ -143,6 +144,7 @@ async fn previews_images_pdfs_and_videos() {
             json!("pdf"),
             json!("video"),
             json!("video"),
+            json!("audio"),
             json!(null),
             json!(null),
             json!(null)
@@ -178,7 +180,7 @@ async fn previews_images_pdfs_and_videos() {
         "frame-ancestors 'self'"
     );
 
-    for (index, content_type) in [(2, "video/mp4"), (3, "video/webm")] {
+    for (index, content_type) in [(2, "video/mp4"), (3, "video/webm"), (4, "audio/mpeg")] {
         let video = server
             .api(
                 alex,
@@ -196,7 +198,7 @@ async fn previews_images_pdfs_and_videos() {
         );
     }
 
-    for (id, _) in &files[4..] {
+    for (id, _) in &files[5..] {
         let refused = server
             .api(alex, "GET", &format!("/items/{id}/preview"), None)
             .await;

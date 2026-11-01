@@ -110,6 +110,7 @@ impl ItemView {
             Preview::Image(_) => "image",
             Preview::Pdf => "pdf",
             Preview::Video(_) => "video",
+            Preview::Audio(_) => "audio",
         });
         let thumbnail = blob
             .and_then(|blob| thumbnails.find(blob.hash))
@@ -603,9 +604,11 @@ async fn preview_file(
         return Err(storage::Error::NotAFile.into());
     };
     let (content_type, policy) = match preview(&item.name) {
-        Some(Preview::Image(content_type) | Preview::Video(content_type)) => {
-            (content_type, "sandbox; frame-ancestors 'self'")
-        }
+        Some(
+            Preview::Image(content_type)
+            | Preview::Video(content_type)
+            | Preview::Audio(content_type),
+        ) => (content_type, "sandbox; frame-ancestors 'self'"),
         // Browsers show PDFs in their own viewers, which keep a PDF's
         // scripts away from the page around it. Some of those viewers
         // won't run in a sandbox, so PDFs go without one.
@@ -834,6 +837,8 @@ enum Preview {
     Pdf,
     /// With its type, such as "video/mp4".
     Video(&'static str),
+    /// With its type, such as "audio/mpeg".
+    Audio(&'static str),
 }
 
 /// Whether a file's name lets it show as text: a document, a spreadsheet,
@@ -872,6 +877,12 @@ fn preview(name: &str) -> Option<Preview> {
         // offers the download when it doesn't.
         "mp4" | "m4v" | "mov" => return Some(Preview::Video("video/mp4")),
         "webm" => return Some(Preview::Video("video/webm")),
+        "mp3" => return Some(Preview::Audio("audio/mpeg")),
+        "m4a" => return Some(Preview::Audio("audio/mp4")),
+        "aac" => return Some(Preview::Audio("audio/aac")),
+        "ogg" | "oga" | "opus" => return Some(Preview::Audio("audio/ogg")),
+        "wav" => return Some(Preview::Audio("audio/wav")),
+        "flac" => return Some(Preview::Audio("audio/flac")),
         _ => return None,
     };
     Some(Preview::Image(image))
