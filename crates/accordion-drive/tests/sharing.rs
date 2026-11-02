@@ -282,7 +282,12 @@ fn cases() -> Vec<Case> {
             "/items/{}/shares/{}",
             f.holiday, f.kim
         )),
+        case!("DELETE", "/items/{id}/shares", Owner, |f| format!(
+            "/items/{}/shares",
+            f.holiday
+        )),
         case!("GET", "/shared", Own, |f| "/shared".into()),
+        case!("GET", "/shared-by-me", Own, |f| "/shared-by-me".into()),
         case!("GET", "/trash", Own, |f| "/trash".into()),
         case!("DELETE", "/trash", Own, |f| "/trash".into()),
         case!("DELETE", "/trash/{id}", OwnerAlone, |f| format!(
@@ -541,6 +546,38 @@ async fn shares_and_lists_whats_shared() {
     );
     assert_eq!(
         s.api(&s.kim, "GET", "/shared", None).await.json(),
+        json!([])
+    );
+
+    // Alex's Shared by me lists the folder, with Sam still on it.
+    let out = s.api(&s.alex, "GET", "/shared-by-me", None).await.json();
+    assert_eq!(out.as_array().unwrap().len(), 1);
+    assert_eq!(out[0]["name"], "Holiday 0");
+    assert_eq!(out[0]["folders"], json!([]));
+    assert_eq!(out[0]["shared"], true);
+    assert_eq!(out[0]["shared_with"][0]["username"], "sam");
+    assert_eq!(out[0]["shared_with"][0]["level"], "editor");
+    assert!(out[0]["shared_at"].is_string());
+    assert_eq!(
+        s.api(&s.kim, "GET", "/shared-by-me", None).await.json(),
+        json!([])
+    );
+    // Stop sharing removes everyone at once.
+    let reply = s
+        .api(
+            &s.alex,
+            "DELETE",
+            &format!("/items/{}/shares", f.holiday),
+            None,
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        s.api(&s.alex, "GET", "/shared-by-me", None).await.json(),
+        json!([])
+    );
+    assert_eq!(
+        s.api(&s.sam, "GET", "/shared", None).await.json(),
         json!([])
     );
     let reply = s

@@ -1,5 +1,6 @@
 //! Sharing in `/api/drive`: who an item is shared with, sharing it with
-//! someone or changing their access, and **Shared with me**. Core keeps the
+//! someone or changing their access, **Shared with me**, and **Shared by
+//! me**. Core keeps the
 //! shares and decides what each person may do (decision 16). Only the owner
 //! shares, at first.
 
@@ -12,7 +13,7 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::DriveState;
-use crate::api::ItemView;
+use crate::api::{FoundView, ItemView};
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -118,6 +119,67 @@ pub(crate) async fn unshare(
     state.storage.unshare(id, user, me.user.id).await?;
     tracing::info!(user = %me.user.id, item = %id, with = %user, "stopped sharing an item");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /items/{id}/shares`: stops sharing an item with everyone it's
+/// shared with directly. Shares on folders above it stay.
+pub(crate) async fn unshare_all(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path(id): Path<ItemId>,
+) -> Result<StatusCode, ApiError> {
+    state.reach(me.user.id, id, Access::Owner).await?;
+    let removed = state.storage.unshare_all(id, me.user.id).await?;
+    tracing::info!(user = %me.user.id, item = %id, people = removed.len(), "stopped sharing an item with everyone");
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Something the signed-in user shared, and who with.
+#[derive(Serialize)]
+pub(crate) struct SharedOutView {
+    #[serde(flatten)]
+    found: FoundView,
+    shared_with: Vec<ShareView>,
+    /// When it was last shared with someone new.
+    shared_at: String,
+}
+
+/// `GET /shared-by-me`: what the signed-in user shared directly, outside
+/// the trash, most recently shared first, as Proton Drive's **Shared**
+/// lists it.
+pub(crate) async fn shared_by_me(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+) -> Result<Json<Vec<SharedOutView>>, ApiError> {
+    let shared = state.storage.shared_by(me.user.id).await?;
+    let mut people = Vec::with_capacity(shared.len());
+    let mut found = Vec::with_capacity(shared.len());
+    for out in shared {
+        let shared_at = out
+            .shares
+            .iter()
+            .map(|share| share.created_at.clone())
+            .max()
+            .unwrap_or_default();
+        let mut with = Vec::with_capacity(out.shares.len());
+        for share in out.shares {
+            with.extend(state.share_view(share).await?);
+        }
+        people.push((with, shared_at));
+        found.push(out.found);
+    }
+    let Json(views) = state.found_views(me.user.id, found).await?;
+    // The user owns every item, so none are dropped and the order holds.
+    let views = views
+        .into_iter()
+        .zip(people)
+        .map(|(found, (shared_with, shared_at))| SharedOutView {
+            found,
+            shared_with,
+            shared_at,
+        })
+        .collect();
+    Ok(Json(views))
 }
 
 /// Something someone else shared with the signed-in user.

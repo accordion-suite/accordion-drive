@@ -60,12 +60,16 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/largest", get(largest))
         .route("/items/{id}/copy", post(copy))
         .route("/items/{id}/versions", get(versions))
-        .route("/items/{id}/shares", get(sharing::shares))
+        .route(
+            "/items/{id}/shares",
+            get(sharing::shares).delete(sharing::unshare_all),
+        )
         .route(
             "/items/{id}/shares/{user}",
             put(sharing::share).delete(sharing::unshare),
         )
         .route("/shared", get(sharing::shared_with_me))
+        .route("/shared-by-me", get(sharing::shared_by_me))
         .route(
             "/items/{id}/versions/{version}/content",
             get(download_version),
@@ -215,7 +219,7 @@ pub(crate) struct FoundView {
     /// The names of the folders it's in, outermost first, not counting the
     /// top folder. For someone else's item, they start at the folder that
     /// was shared, and are empty for the shared item itself.
-    folders: Vec<String>,
+    pub(crate) folders: Vec<String>,
 }
 
 impl DriveState {
