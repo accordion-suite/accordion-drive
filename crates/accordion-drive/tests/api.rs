@@ -1098,6 +1098,18 @@ async fn previews_office_documents_once_core_makes_them() {
     );
     assert!(reply.body.starts_with(b"%PDF-"));
 
+    // At an address that ends in the name, for the PDF viewer's title.
+    let reply = server
+        .api(
+            alex,
+            "GET",
+            &format!("/items/{id}/preview/Budget%202026.xlsx"),
+            None,
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(reply.body.starts_with(b"%PDF-"));
+
     // Browsers' PDF viewers ask for parts of long ones.
     let reply = server
         .send(
@@ -1115,4 +1127,117 @@ async fn previews_office_documents_once_core_makes_them() {
         .api(&server.sam, "GET", &format!("/items/{id}/preview"), None)
         .await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn colors_describes_and_sizes_folders() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let folder = |name: &'static str, parent: String| {
+        let server = &server;
+        async move {
+            server
+                .api(
+                    &server.alex,
+                    "POST",
+                    &format!("/items/{parent}/children"),
+                    Some(json!({ "name": name })),
+                )
+                .await
+                .json()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+    let trip = folder("Trip", top.clone()).await;
+    let day = folder("Day 1", trip.clone()).await;
+    let notes = write(&server, &top, "notes.txt", "Pick up the bread.").await;
+    write(&server, &trip, "map.txt", "North, then east.").await;
+    write(&server, &day, "beach.txt", "Sand, and a lot of it.").await;
+
+    // A folder's size is everything in it, however deep.
+    let children = server
+        .api(alex, "GET", &format!("/items/{top}/children"), None)
+        .await
+        .json();
+    let trip_view = children
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["name"] == "Trip")
+        .unwrap();
+    assert_eq!(trip_view["size"], json!(17 + 22));
+    assert_eq!(trip_view["color"], json!(null));
+
+    // Colors are for folders, from a set list, and each person's own.
+    let reply = server
+        .api(
+            alex,
+            "PUT",
+            &format!("/items/{trip}/color"),
+            Some(json!({ "color": "teal" })),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    let item = server
+        .api(alex, "GET", &format!("/items/{trip}"), None)
+        .await
+        .json();
+    assert_eq!(item["color"], json!("teal"));
+    for (id, color) in [(&trip, "plaid"), (&notes, "teal")] {
+        let reply = server
+            .api(
+                alex,
+                "PUT",
+                &format!("/items/{id}/color"),
+                Some(json!({ "color": color })),
+            )
+            .await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{color}");
+    }
+    let reply = server
+        .api(alex, "DELETE", &format!("/items/{trip}/color"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    let item = server
+        .api(alex, "GET", &format!("/items/{trip}"), None)
+        .await
+        .json();
+    assert_eq!(item["color"], json!(null));
+
+    // A description is the item's, trimmed, and an empty one removes it.
+    let address = format!("/items/{notes}/description");
+    let reply = server
+        .api(
+            alex,
+            "PUT",
+            &address,
+            Some(json!({ "description": "  For Saturday's shop.  " })),
+        )
+        .await;
+    assert_eq!(reply.json()["description"], "For Saturday's shop.");
+    let reply = server.api(alex, "GET", &address, None).await;
+    assert_eq!(reply.json()["description"], "For Saturday's shop.");
+    let long = "a".repeat(2001);
+    let reply = server
+        .api(alex, "PUT", &address, Some(json!({ "description": long })))
+        .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
+    server
+        .api(alex, "PUT", &address, Some(json!({ "description": "" })))
+        .await;
+    let reply = server.api(alex, "GET", &address, None).await;
+    assert_eq!(reply.json()["description"], "");
+
+    // The storage page lists the largest files first.
+    let largest = server.api(alex, "GET", "/largest", None).await.json();
+    assert_eq!(
+        names(&largest),
+        ["Trip/Day 1/beach.txt", "notes.txt", "Trip/map.txt"]
+    );
 }

@@ -208,6 +208,34 @@ fn cases() -> Vec<Case> {
             "/items/{}/restore",
             f.trashed
         )),
+        case!("GET", "/items/{id}/preview/{name}", Viewer, |f| format!(
+            "/items/{}/preview/beach.jpg",
+            f.photo
+        )),
+        // A color is the reader's own, as a star is.
+        case!(
+            "PUT",
+            "/items/{id}/color",
+            Viewer,
+            |f| format!("/items/{}/color", f.holiday),
+            Some(json!({ "color": "blue" }))
+        ),
+        case!("DELETE", "/items/{id}/color", Viewer, |f| format!(
+            "/items/{}/color",
+            f.holiday
+        )),
+        case!("GET", "/items/{id}/description", Viewer, |f| format!(
+            "/items/{}/description",
+            f.photo
+        )),
+        case!(
+            "PUT",
+            "/items/{id}/description",
+            Editor,
+            |f| format!("/items/{}/description", f.photo),
+            Some(json!({ "description": "The first day at the beach." }))
+        ),
+        case!("GET", "/largest", Own, |f| "/largest".into()),
         case!("PUT", "/items/{id}/star", Viewer, |f| format!(
             "/items/{}/star",
             f.photo

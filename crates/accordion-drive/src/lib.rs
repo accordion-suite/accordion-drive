@@ -9,7 +9,9 @@
 
 mod api;
 mod archive;
+mod colors;
 mod dav;
+mod descriptions;
 mod settings;
 mod sharing;
 mod stars;
@@ -33,7 +35,12 @@ const OWNER: &str = "drive";
 
 /// Drive's tables, in the order they were added. Each table's module has
 /// its own.
-static MIGRATIONS: &[Migration] = &[stars::MIGRATION, settings::MIGRATION];
+static MIGRATIONS: &[Migration] = &[
+    stars::MIGRATION,
+    settings::MIGRATION,
+    colors::MIGRATION,
+    descriptions::MIGRATION,
+];
 
 /// The Drive module. Add it to the server's list of modules.
 pub struct Drive;
@@ -56,6 +63,8 @@ impl Module for Drive {
             services.db.migrate(OWNER, MIGRATIONS).await?;
             let state = DriveState {
                 stars: stars::Stars::new(services.db.clone()),
+                colors: colors::Colors::new(services.db.clone()),
+                descriptions: descriptions::Descriptions::new(services.db.clone()),
                 settings: settings::Settings::new(services.db),
                 identity: services.identity,
                 dav: Arc::new(dav::handler(
@@ -83,6 +92,8 @@ impl Module for Drive {
 struct DriveState {
     identity: Identity,
     stars: stars::Stars,
+    colors: colors::Colors,
+    descriptions: descriptions::Descriptions,
     settings: settings::Settings,
     storage: Storage,
     thumbnails: Thumbnails,

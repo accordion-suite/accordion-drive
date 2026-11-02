@@ -154,5 +154,8 @@ pub(crate) async fn shared_with_me(
             shared_at: shared.share.created_at,
         });
     }
+    state
+        .size_folders(views.iter_mut().map(|view| &mut view.item))
+        .await?;
     Ok(Json(views))
 }

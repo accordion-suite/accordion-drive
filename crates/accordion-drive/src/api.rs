@@ -34,7 +34,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::settings::DriveSettings;
-use crate::{DriveState, archive, sharing, time};
+use crate::{DriveState, archive, colors, descriptions, sharing, time};
 
 /// Says where a piece of a resumable upload starts. The name follows the
 /// tus protocol, which uses the same header for the same purpose.
@@ -48,9 +48,16 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/items/{id}/children/{name}", put(write_file))
         .route("/items/{id}/content", get(download))
         .route("/items/{id}/preview", get(preview_file))
+        .route("/items/{id}/preview/{name}", get(preview_named))
         .route("/items/{id}/thumbnail", get(thumbnail))
         .route("/items/{id}/restore", post(restore))
         .route("/items/{id}/star", put(star).delete(unstar))
+        .route("/items/{id}/color", put(set_color).delete(clear_color))
+        .route(
+            "/items/{id}/description",
+            get(description).put(set_description),
+        )
+        .route("/largest", get(largest))
         .route("/items/{id}/copy", post(copy))
         .route("/items/{id}/versions", get(versions))
         .route("/items/{id}/shares", get(sharing::shares))
@@ -119,6 +126,8 @@ pub(crate) struct ItemView {
     owner: Option<String>,
     /// For the owner: whether they shared it with anyone.
     shared: bool,
+    /// For a folder: the color the signed-in user picked for it, if any.
+    color: Option<String>,
 }
 
 /// What views need to know about the signed-in user.
@@ -129,6 +138,8 @@ pub(crate) struct Reader {
     shared: HashSet<ItemId>,
     /// The names of the people who own the other items being shown.
     names: HashMap<UserId, String>,
+    /// The folder colors they picked.
+    colors: HashMap<ItemId, String>,
 }
 
 pub(crate) fn access_name(access: Access) -> &'static str {
@@ -147,6 +158,7 @@ impl ItemView {
         thumbnails: &Thumbnails,
     ) -> Self {
         let starred = reader.stars.contains(&item.id);
+        let color = reader.colors.get(&item.id).cloned();
         let shared = item.owner == reader.user && reader.shared.contains(&item.id);
         let owner = (item.owner != reader.user)
             .then(|| reader.names.get(&item.owner).cloned().unwrap_or_default());
@@ -190,6 +202,7 @@ impl ItemView {
             access: access_name(access),
             owner,
             shared,
+            color,
         }
     }
 }
@@ -233,12 +246,38 @@ impl DriveState {
                 .into_iter()
                 .collect(),
             names,
+            colors: self.colors.all(user).await?,
         })
     }
 
     async fn view(&self, user: UserId, item: Item, access: Access) -> Result<ItemView, ApiError> {
         let reader = self.reader(user, [item.owner]).await?;
-        Ok(ItemView::new(item, access, &reader, &self.thumbnails))
+        let mut view = ItemView::new(item, access, &reader, &self.thumbnails);
+        self.size_folders(std::slice::from_mut(&mut view)).await?;
+        Ok(view)
+    }
+
+    /// Fills in each folder's size: what's in it, however deep, as
+    /// Nextcloud shows.
+    pub(crate) async fn size_folders<'a>(
+        &self,
+        views: impl IntoIterator<Item = &'a mut ItemView>,
+    ) -> Result<(), ApiError> {
+        let folders: Vec<&mut ItemView> = views
+            .into_iter()
+            .filter(|view| view.kind == "folder")
+            .collect();
+        if folders.is_empty() {
+            return Ok(());
+        }
+        let sizes = self
+            .storage
+            .folder_sizes(folders.iter().map(|view| view.id).collect())
+            .await?;
+        for view in folders {
+            view.size = sizes.get(&view.id).copied();
+        }
+        Ok(())
     }
 
     /// Views of what's in a folder that `user` has `access` to. A share on
@@ -265,7 +304,7 @@ impl DriveState {
                 items.iter().map(|item| item.owner).collect::<Vec<_>>(),
             )
             .await?;
-        Ok(items
+        let mut views: Vec<ItemView> = items
             .into_iter()
             .map(|item| {
                 let access = direct
@@ -273,7 +312,9 @@ impl DriveState {
                     .map_or(access, |&more| access.max(more));
                 ItemView::new(item, access, &reader, &self.thumbnails)
             })
-            .collect())
+            .collect();
+        self.size_folders(&mut views).await?;
+        Ok(views)
     }
 
     /// Views of items found across folders, leaving out any `user` can't
@@ -295,15 +336,16 @@ impl DriveState {
         }
         let owners: Vec<UserId> = reached.iter().map(|(found, _)| found.item.owner).collect();
         let reader = self.reader(user, owners).await?;
-        Ok(Json(
-            reached
-                .into_iter()
-                .map(|(found, access)| FoundView {
-                    item: ItemView::new(found.item, access, &reader, &self.thumbnails),
-                    folders: found.folders,
-                })
-                .collect(),
-        ))
+        let mut views: Vec<FoundView> = reached
+            .into_iter()
+            .map(|(found, access)| FoundView {
+                item: ItemView::new(found.item, access, &reader, &self.thumbnails),
+                folders: found.folders,
+            })
+            .collect();
+        self.size_folders(views.iter_mut().map(|view| &mut view.item))
+            .await?;
+        Ok(Json(views))
     }
 }
 
@@ -534,6 +576,110 @@ async fn unstar(
     state.reach(me.user.id, id, Access::Viewer).await?;
     state.stars.unstar(me.user.id, vec![id]).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct ColorRequest {
+    color: String,
+}
+
+/// `PUT /items/{id}/color`: gives a folder a color, for the signed-in user
+/// only, as with stars.
+async fn set_color(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path(id): Path<ItemId>,
+    Json(request): Json<ColorRequest>,
+) -> Result<StatusCode, ApiError> {
+    let (item, _) = state.reach(me.user.id, id, Access::Viewer).await?;
+    if !matches!(item.kind, ItemKind::Folder) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Only folders have colors.",
+        ));
+    }
+    let color = colors::COLORS
+        .iter()
+        .copied()
+        .find(|&color| color == request.color)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Accordion doesn't have the color \"{}\". Choose another.",
+                    request.color
+                ),
+            )
+        })?;
+    state.colors.set(me.user.id, id, Some(color)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /items/{id}/color`: gives a folder its usual color back.
+async fn clear_color(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path(id): Path<ItemId>,
+) -> Result<StatusCode, ApiError> {
+    state.reach(me.user.id, id, Access::Viewer).await?;
+    state.colors.set(me.user.id, id, None).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize, Serialize)]
+struct DescriptionBody {
+    description: String,
+}
+
+/// `GET /items/{id}/description`: what the item's description says, or an
+/// empty one.
+async fn description(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path(id): Path<ItemId>,
+) -> Result<Json<DescriptionBody>, ApiError> {
+    state.reach(me.user.id, id, Access::Viewer).await?;
+    let description = state.descriptions.get(id).await?.unwrap_or_default();
+    Ok(Json(DescriptionBody { description }))
+}
+
+/// `PUT /items/{id}/description`: changes the item's description, or
+/// removes it when it's empty. Anyone who can edit the item can.
+async fn set_description(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path(id): Path<ItemId>,
+    Json(request): Json<DescriptionBody>,
+) -> Result<Json<DescriptionBody>, ApiError> {
+    state.reach(me.user.id, id, Access::Editor).await?;
+    let description = request.description.trim().to_owned();
+    if description.chars().count() > descriptions::MAX_LEN {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "A description can be up to {} characters. Shorten it, then save it again.",
+                descriptions::MAX_LEN
+            ),
+        ));
+    }
+    state
+        .descriptions
+        .set(me.user.id, id, description.clone())
+        .await?;
+    Ok(Json(DescriptionBody { description }))
+}
+
+/// How many files `/largest` lists.
+const LARGEST: usize = 100;
+
+/// `GET /largest`: the signed-in user's largest files outside the trash,
+/// largest first, for the storage page.
+async fn largest(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+) -> Result<Json<Vec<FoundView>>, ApiError> {
+    let found = state.storage.largest(me.user.id, LARGEST).await?;
+    state.found_views(me.user.id, found).await
 }
 
 #[derive(Deserialize)]
@@ -826,6 +972,18 @@ async fn preview_file(
     };
     let disposition = disposition("inline", &item.name);
     send_file(&state, &request, blob, content_type, disposition, policy).await
+}
+
+/// `GET /items/{id}/preview/{name}`: the same, at an address that ends in
+/// the file's name, which a browser's PDF viewer shows as its title. The
+/// name is only for show.
+async fn preview_named(
+    state: State<DriveState>,
+    me: Authenticated,
+    Path((id, _name)): Path<(ItemId, String)>,
+    request: HeaderMap,
+) -> Result<Response, ApiError> {
+    preview_file(state, me, Path(id), request).await
 }
 
 /// `GET /items/{id}/thumbnail`: a small picture of the file's current
