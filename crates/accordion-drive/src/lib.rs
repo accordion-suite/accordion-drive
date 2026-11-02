@@ -4,13 +4,14 @@
 //!
 //! Drive keeps no files of its own. Core's storage service holds them
 //! (decision 6 in the `accordion` repo's `docs/decisions`), and Drive is how
-//! people reach them. Each person sees only their own files until sharing
-//! arrives.
+//! people reach them. People see their own files and what others shared
+//! with them, and core decides what each person may do (decision 16).
 
 mod api;
 mod archive;
 mod dav;
 mod settings;
+mod sharing;
 mod stars;
 mod time;
 
@@ -18,13 +19,14 @@ use std::sync::Arc;
 
 use accordion_core::db::Migration;
 use accordion_core::identity::Identity;
-use accordion_core::storage::{Item, Storage};
+use accordion_core::storage::{Access, Item, Storage};
 use accordion_core::thumbnails::Thumbnails;
 use accordion_module::{
     ApiError, BoxFuture, Module, Routes, Services, StartError, Started, Stopping,
 };
 use accordion_types::{ItemId, UserId};
 use axum::extract::FromRef;
+use axum::http::StatusCode;
 
 /// The name Drive's migrations are recorded under.
 const OWNER: &str = "drive";
@@ -89,12 +91,34 @@ impl FromRef<DriveState> for Identity {
 }
 
 impl DriveState {
-    /// An item that `user` owns. Anyone else's is "not found", so nobody
-    /// learns what other people have.
-    async fn owned(&self, user: UserId, id: ItemId) -> Result<Item, ApiError> {
-        match self.storage.item(id).await? {
-            Some(item) if item.owner == user => Ok(item),
-            _ => Err(ApiError::not_found()),
+    /// An item that `user` may use at `needed` or above, with what they may
+    /// do. What nobody shared with them is "not found", so nobody learns
+    /// what other people have.
+    async fn reach(
+        &self,
+        user: UserId,
+        id: ItemId,
+        needed: Access,
+    ) -> Result<(Item, Access), ApiError> {
+        let access = self
+            .storage
+            .access(user, id)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        if access < needed {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                match needed {
+                    Access::Owner => "Only the owner can do that.",
+                    _ => "You can view this, but not change it. Ask its owner for edit access.",
+                },
+            ));
         }
+        let item = self
+            .storage
+            .item(id)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        Ok((item, access))
     }
 }

@@ -1,16 +1,19 @@
 //! `/api/drive`: the JSON API that Accordion's web, desktop, and mobile apps
 //! use.
 //!
-//! Items are files and folders, named by ID. Each request checks that the
-//! signed-in user owns what it names, and answers "not found" otherwise.
-//! Lists that reach across folders, such as search results, say where each
-//! item is, as the names of the folders it's in.
+//! Items are files and folders, named by ID. Each request asks core what
+//! the signed-in user may do with what it names, and answers "not found"
+//! if it isn't theirs and nobody shared it with them. Lists that reach
+//! across folders, such as search results, say where each item is, as the
+//! names of the folders it's in, starting from the shared folder for items
+//! someone else owns.
 
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::ops::Range;
 
 use accordion_core::storage::{
-    self, Blob, Found, Item, ItemKind, Only, Search, Upload, Usage, Version,
+    self, Access, Blob, Found, Item, ItemKind, Only, Search, Upload, Usage, Version,
 };
 use accordion_core::thumbnails::{ThumbnailKind, Thumbnails};
 use accordion_module::{ApiError, Authenticated};
@@ -31,7 +34,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::settings::DriveSettings;
-use crate::{DriveState, archive, time};
+use crate::{DriveState, archive, sharing, time};
 
 /// Says where a piece of a resumable upload starts. The name follows the
 /// tus protocol, which uses the same header for the same purpose.
@@ -50,6 +53,12 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/items/{id}/star", put(star).delete(unstar))
         .route("/items/{id}/copy", post(copy))
         .route("/items/{id}/versions", get(versions))
+        .route("/items/{id}/shares", get(sharing::shares))
+        .route(
+            "/items/{id}/shares/{user}",
+            put(sharing::share).delete(sharing::unshare),
+        )
+        .route("/shared", get(sharing::shared_with_me))
         .route(
             "/items/{id}/versions/{version}/content",
             get(download_version),
@@ -76,7 +85,7 @@ pub(crate) fn routes(state: DriveState) -> Router {
 }
 
 #[derive(Serialize)]
-struct ItemView {
+pub(crate) struct ItemView {
     id: ItemId,
     /// `None` for the user's top folder.
     parent: Option<ItemId>,
@@ -99,10 +108,44 @@ struct ItemView {
     trashed_at: Option<String>,
     /// Whether the signed-in user starred it.
     starred: bool,
+    /// What the signed-in user may do with it: "owner", "editor", or
+    /// "viewer".
+    access: &'static str,
+    /// The owner's name, when it's someone else's.
+    owner: Option<String>,
+    /// For the owner: whether they shared it with anyone.
+    shared: bool,
+}
+
+/// What views need to know about the signed-in user.
+pub(crate) struct Reader {
+    user: UserId,
+    stars: HashSet<ItemId>,
+    /// Their own items that they shared with someone.
+    shared: HashSet<ItemId>,
+    /// The names of the people who own the other items being shown.
+    names: HashMap<UserId, String>,
+}
+
+pub(crate) fn access_name(access: Access) -> &'static str {
+    match access {
+        Access::Owner => "owner",
+        Access::Editor => "editor",
+        Access::Viewer => "viewer",
+    }
 }
 
 impl ItemView {
-    fn new(item: Item, starred: bool, thumbnails: &Thumbnails) -> Self {
+    pub(crate) fn new(
+        item: Item,
+        access: Access,
+        reader: &Reader,
+        thumbnails: &Thumbnails,
+    ) -> Self {
+        let starred = reader.stars.contains(&item.id);
+        let shared = item.owner == reader.user && reader.shared.contains(&item.id);
+        let owner = (item.owner != reader.user)
+            .then(|| reader.names.get(&item.owner).cloned().unwrap_or_default());
         let (kind, version, blob) = match item.kind {
             ItemKind::Folder => ("folder", None, None),
             ItemKind::File { version, blob } => ("file", Some(version), Some(blob)),
@@ -135,55 +178,136 @@ impl ItemView {
             modified_at: item.modified_at,
             trashed_at: item.trashed_at,
             starred,
+            access: access_name(access),
+            owner,
+            shared,
         }
     }
 }
 
 /// An item in a list that reaches across folders.
 #[derive(Serialize)]
-struct FoundView {
+pub(crate) struct FoundView {
     #[serde(flatten)]
-    item: ItemView,
+    pub(crate) item: ItemView,
     /// The names of the folders it's in, outermost first, not counting the
-    /// top folder.
+    /// top folder. For someone else's item, they start at the folder that
+    /// was shared, and are empty for the shared item itself.
     folders: Vec<String>,
 }
 
 impl DriveState {
-    async fn view(&self, user: UserId, item: Item) -> Result<ItemView, ApiError> {
-        let starred = self.stars.set(user).await?.contains(&item.id);
-        Ok(ItemView::new(item, starred, &self.thumbnails))
+    /// What views of items with these `owners` need to know about `user`.
+    pub(crate) async fn reader(
+        &self,
+        user: UserId,
+        owners: impl IntoIterator<Item = UserId>,
+    ) -> Result<Reader, ApiError> {
+        let others: HashSet<UserId> = owners.into_iter().filter(|&owner| owner != user).collect();
+        let mut names = HashMap::new();
+        for owner in others {
+            let name = self
+                .identity
+                .user(owner)
+                .await?
+                .map(|owner| owner.display_name)
+                .unwrap_or_default();
+            names.insert(owner, name);
+        }
+        Ok(Reader {
+            user,
+            stars: self.stars.set(user).await?,
+            shared: self
+                .storage
+                .shared_by_owner(user)
+                .await?
+                .into_iter()
+                .collect(),
+            names,
+        })
     }
 
-    async fn views(&self, user: UserId, items: Vec<Item>) -> Result<Vec<ItemView>, ApiError> {
-        let stars = self.stars.set(user).await?;
+    async fn view(&self, user: UserId, item: Item, access: Access) -> Result<ItemView, ApiError> {
+        let reader = self.reader(user, [item.owner]).await?;
+        Ok(ItemView::new(item, access, &reader, &self.thumbnails))
+    }
+
+    /// Views of what's in a folder that `user` has `access` to. A share on
+    /// an item inside can give them more.
+    async fn child_views(
+        &self,
+        user: UserId,
+        items: Vec<Item>,
+        access: Access,
+    ) -> Result<Vec<ItemView>, ApiError> {
+        let direct: HashMap<ItemId, Access> = match access {
+            Access::Owner => HashMap::new(),
+            _ => self
+                .storage
+                .shared_with(user)
+                .await?
+                .into_iter()
+                .map(|shared| (shared.item.id, shared.share.level.into()))
+                .collect(),
+        };
+        let reader = self
+            .reader(
+                user,
+                items.iter().map(|item| item.owner).collect::<Vec<_>>(),
+            )
+            .await?;
         Ok(items
             .into_iter()
             .map(|item| {
-                let starred = stars.contains(&item.id);
-                ItemView::new(item, starred, &self.thumbnails)
+                let access = direct
+                    .get(&item.id)
+                    .map_or(access, |&more| access.max(more));
+                ItemView::new(item, access, &reader, &self.thumbnails)
             })
             .collect())
     }
 
-    async fn found_views(
+    /// Views of items found across folders, leaving out any `user` can't
+    /// reach.
+    pub(crate) async fn found_views(
         &self,
         user: UserId,
         found: Vec<Found>,
     ) -> Result<Json<Vec<FoundView>>, ApiError> {
-        let stars = self.stars.set(user).await?;
+        let mut reached = Vec::with_capacity(found.len());
+        for found in found {
+            let access = match found.item.owner == user {
+                true => Some(Access::Owner),
+                false => self.storage.access(user, found.item.id).await?,
+            };
+            if let Some(access) = access {
+                reached.push((found, access));
+            }
+        }
+        let owners: Vec<UserId> = reached.iter().map(|(found, _)| found.item.owner).collect();
+        let reader = self.reader(user, owners).await?;
         Ok(Json(
-            found
+            reached
                 .into_iter()
-                .map(|found| {
-                    let starred = stars.contains(&found.item.id);
-                    FoundView {
-                        item: ItemView::new(found.item, starred, &self.thumbnails),
-                        folders: found.folders,
-                    }
+                .map(|(found, access)| FoundView {
+                    item: ItemView::new(found.item, access, &reader, &self.thumbnails),
+                    folders: found.folders,
                 })
                 .collect(),
         ))
+    }
+}
+
+/// Storage says "your storage is full", which is wrong when someone saves
+/// into a folder that someone else owns and shared with them.
+fn space_error(err: storage::Error, owner: UserId, me: UserId) -> ApiError {
+    match err {
+        storage::Error::QuotaFull if owner != me => ApiError::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "The owner of this folder is out of space, so it can't take more files. Ask them \
+             to free up some space.",
+        ),
+        err => err.into(),
     }
 }
 
@@ -251,8 +375,8 @@ type ItemResult = Result<Json<ItemView>, ApiError>;
 /// `GET /top`: the user's top folder.
 async fn top(State(state): State<DriveState>, Authenticated(me): Authenticated) -> ItemResult {
     let id = state.storage.top_folder(me.user.id).await?;
-    let item = state.owned(me.user.id, id).await?;
-    Ok(Json(state.view(me.user.id, item).await?))
+    let (item, access) = state.reach(me.user.id, id, Access::Owner).await?;
+    Ok(Json(state.view(me.user.id, item, access).await?))
 }
 
 /// `GET /items/{id}`
@@ -261,8 +385,8 @@ async fn item(
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
 ) -> ItemResult {
-    let item = state.owned(me.user.id, id).await?;
-    Ok(Json(state.view(me.user.id, item).await?))
+    let (item, access) = state.reach(me.user.id, id, Access::Viewer).await?;
+    Ok(Json(state.view(me.user.id, item, access).await?))
 }
 
 /// `GET /items/{id}/children`: what's in a folder, sorted by name.
@@ -271,9 +395,9 @@ async fn children(
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
 ) -> Result<Json<Vec<ItemView>>, ApiError> {
-    state.owned(me.user.id, id).await?;
+    let (_, access) = state.reach(me.user.id, id, Access::Viewer).await?;
     let children = state.storage.children(id).await?;
-    Ok(Json(state.views(me.user.id, children).await?))
+    Ok(Json(state.child_views(me.user.id, children, access).await?))
 }
 
 #[derive(Deserialize)]
@@ -288,11 +412,11 @@ async fn create_folder(
     Path(parent): Path<ItemId>,
     Json(request): Json<NewFolder>,
 ) -> Result<(StatusCode, Json<ItemView>), ApiError> {
-    state.owned(me.user.id, parent).await?;
+    let (_, access) = state.reach(me.user.id, parent, Access::Editor).await?;
     let folder = state.storage.create_folder(parent, &request.name).await?;
     Ok((
         StatusCode::CREATED,
-        Json(state.view(me.user.id, folder).await?),
+        Json(state.view(me.user.id, folder, access).await?),
     ))
 }
 
@@ -305,12 +429,13 @@ async fn write_file(
     Path((parent, name)): Path<(ItemId, String)>,
     body: Body,
 ) -> ItemResult {
-    state.owned(me.user.id, parent).await?;
+    let (folder, access) = state.reach(me.user.id, parent, Access::Editor).await?;
     let file = state
         .storage
         .write_file(parent, &name, reader(body))
-        .await?;
-    Ok(Json(state.view(me.user.id, file).await?))
+        .await
+        .map_err(|err| space_error(err, folder.owner, me.user.id))?;
+    Ok(Json(state.view(me.user.id, file, access).await?))
 }
 
 #[derive(Deserialize)]
@@ -328,14 +453,16 @@ async fn move_item(
     Path(id): Path<ItemId>,
     Json(request): Json<MoveRequest>,
 ) -> ItemResult {
-    let item = state.owned(me.user.id, id).await?;
+    let (item, access) = state.reach(me.user.id, id, Access::Editor).await?;
+    // Editors move items only between folders they can edit, so nothing
+    // leaves the shared folder unless its owner moves it.
     let parent = match request.parent {
-        Some(parent) => state.owned(me.user.id, parent).await?.id,
+        Some(parent) => state.reach(me.user.id, parent, Access::Editor).await?.0.id,
         None => item.parent.ok_or(storage::Error::TopFolder)?,
     };
     let name = request.name.unwrap_or(item.name);
     let moved = state.storage.move_item(id, parent, &name).await?;
-    Ok(Json(state.view(me.user.id, moved).await?))
+    Ok(Json(state.view(me.user.id, moved, access).await?))
 }
 
 /// `DELETE /items/{id}`: moves an item to the trash.
@@ -344,9 +471,9 @@ async fn trash_item(
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
 ) -> ItemResult {
-    state.owned(me.user.id, id).await?;
+    let (_, access) = state.reach(me.user.id, id, Access::Editor).await?;
     let deleted = state.storage.delete(id).await?;
-    Ok(Json(state.view(me.user.id, deleted).await?))
+    Ok(Json(state.view(me.user.id, deleted, access).await?))
 }
 
 /// `POST /items/{id}/restore`: takes an item out of the trash.
@@ -355,9 +482,9 @@ async fn restore(
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
 ) -> ItemResult {
-    state.owned(me.user.id, id).await?;
+    let (_, access) = state.reach(me.user.id, id, Access::Owner).await?;
     let restored = state.storage.restore(id).await?;
-    Ok(Json(state.view(me.user.id, restored).await?))
+    Ok(Json(state.view(me.user.id, restored, access).await?))
 }
 
 /// `GET /settings`: the signed-in person's Drive settings.
@@ -384,7 +511,7 @@ async fn star(
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
 ) -> Result<StatusCode, ApiError> {
-    state.owned(me.user.id, id).await?;
+    state.reach(me.user.id, id, Access::Viewer).await?;
     state.stars.star(me.user.id, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -395,16 +522,19 @@ async fn unstar(
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
 ) -> Result<StatusCode, ApiError> {
-    state.owned(me.user.id, id).await?;
+    state.reach(me.user.id, id, Access::Viewer).await?;
     state.stars.unstar(me.user.id, vec![id]).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
 struct CopyRequest {
-    /// The folder to copy into. Leave it out for the same folder.
+    /// The folder to copy into. Leave it out for the same folder, or for
+    /// the top folder if the user can't add to that one.
     parent: Option<ItemId>,
-    /// The copy's name, such as "Copy of Beach.jpg". It can't be taken.
+    /// The copy's name, such as "Copy of Beach.jpg". It can't be taken,
+    /// unless the copy goes to the top folder in place of a folder the user
+    /// can't add to, where it gets a number.
     name: String,
 }
 
@@ -415,15 +545,53 @@ async fn copy(
     Path(id): Path<ItemId>,
     Json(request): Json<CopyRequest>,
 ) -> Result<(StatusCode, Json<ItemView>), ApiError> {
-    let item = state.owned(me.user.id, id).await?;
-    let parent = match request.parent {
-        Some(parent) => state.owned(me.user.id, parent).await?.id,
-        None => item.parent.ok_or(storage::Error::NotAFile)?,
+    let (item, _) = state.reach(me.user.id, id, Access::Viewer).await?;
+    let mut name = request.name;
+    let (parent, access) = match request.parent {
+        Some(parent) => {
+            let (folder, access) = state.reach(me.user.id, parent, Access::Editor).await?;
+            (folder, access)
+        }
+        None => {
+            let here = item.parent.ok_or(storage::Error::NotAFile)?;
+            match state.storage.access(me.user.id, here).await? {
+                Some(access) if access >= Access::Editor => {
+                    let folder = state
+                        .storage
+                        .item(here)
+                        .await?
+                        .ok_or_else(ApiError::not_found)?;
+                    (folder, access)
+                }
+                // A viewer keeps their copy in their own Drive.
+                _ => {
+                    let top = state.storage.top_folder(me.user.id).await?;
+                    let mut taken: HashSet<String> = state
+                        .storage
+                        .children(top)
+                        .await?
+                        .into_iter()
+                        .map(|child| child.name)
+                        .collect();
+                    name = archive::unique(&name, &mut taken);
+                    let folder = state
+                        .storage
+                        .item(top)
+                        .await?
+                        .ok_or_else(ApiError::not_found)?;
+                    (folder, Access::Owner)
+                }
+            }
+        }
     };
-    let copy = state.storage.copy_file(id, parent, &request.name).await?;
+    let copy = state
+        .storage
+        .copy_file(id, parent.id, &name)
+        .await
+        .map_err(|err| space_error(err, parent.owner, me.user.id))?;
     Ok((
         StatusCode::CREATED,
-        Json(state.view(me.user.id, copy).await?),
+        Json(state.view(me.user.id, copy, access).await?),
     ))
 }
 
@@ -433,8 +601,8 @@ const RECENT: usize = 100;
 /// The most results a search returns. Searching for more words narrows it.
 const SEARCH_LIMIT: usize = 200;
 
-/// `GET /recent`: the user's files outside the trash, most recently
-/// changed first.
+/// `GET /recent`: the user's files outside the trash, and files in what
+/// others shared with them, most recently changed first.
 async fn recent(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
@@ -463,10 +631,8 @@ async fn starred(
     if !gone.is_empty() {
         state.stars.unstar(me.user.id, gone).await?;
     }
-    let found = found
-        .into_iter()
-        .filter(|found| found.item.owner == me.user.id)
-        .collect();
+    // Items nobody shares with them any more drop out, but keep their
+    // stars, in case they're shared again.
     state.found_views(me.user.id, found).await
 }
 
@@ -525,7 +691,8 @@ const TYPES: &[(&str, &[&str])] = &[
 ];
 
 /// `GET /search?q=&type=&after=&before=`: the user's items outside the
-/// trash that match, most recently changed first.
+/// trash, and items in what others shared with them, that match, most
+/// recently changed first.
 async fn search(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
@@ -585,7 +752,7 @@ async fn download(
     Path(id): Path<ItemId>,
     request: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let item = state.owned(me.user.id, id).await?;
+    let (item, _) = state.reach(me.user.id, id, Access::Viewer).await?;
     let ItemKind::File { blob, .. } = item.kind else {
         return Err(storage::Error::NotAFile.into());
     };
@@ -600,7 +767,7 @@ async fn preview_file(
     Path(id): Path<ItemId>,
     request: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let item = state.owned(me.user.id, id).await?;
+    let (item, _) = state.reach(me.user.id, id, Access::Viewer).await?;
     let ItemKind::File { blob, .. } = item.kind else {
         return Err(storage::Error::NotAFile.into());
     };
@@ -634,7 +801,7 @@ async fn thumbnail(
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
 ) -> Result<Response, ApiError> {
-    let item = state.owned(me.user.id, id).await?;
+    let (item, _) = state.reach(me.user.id, id, Access::Viewer).await?;
     let ItemKind::File { blob, .. } = item.kind else {
         return Err(storage::Error::NotAFile.into());
     };
@@ -686,16 +853,21 @@ async fn zip_download(
             "Choose what to download, then try again.",
         ));
     }
-    // Items in the trash, or someone else's, are as good as missing.
+    // Items in the trash, or someone else's that nobody shared with them,
+    // are as good as missing.
     let wanted = ids.len();
-    let items: Vec<Item> = state
-        .storage
-        .live_items(ids)
-        .await?
-        .into_iter()
-        .map(|found| found.item)
-        .filter(|item| item.owner == me.user.id)
-        .collect();
+    let found = state.storage.live_items(ids).await?;
+    let mut items: Vec<Item> = Vec::with_capacity(found.len());
+    for found in found {
+        if state
+            .storage
+            .access(me.user.id, found.item.id)
+            .await?
+            .is_some()
+        {
+            items.push(found.item);
+        }
+    }
     if items.len() != wanted {
         return Err(ApiError::not_found());
     }
@@ -721,12 +893,13 @@ async fn zip_download(
 }
 
 /// `GET /items/{id}/versions`: every saved version of a file, newest first.
+/// Only editors and the owner see them, as in Google Drive.
 async fn versions(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
 ) -> Result<Json<Vec<VersionView>>, ApiError> {
-    state.owned(me.user.id, id).await?;
+    state.reach(me.user.id, id, Access::Editor).await?;
     let versions = state.storage.versions(id).await?;
     Ok(Json(versions.into_iter().map(VersionView::from).collect()))
 }
@@ -738,7 +911,7 @@ async fn download_version(
     Path((id, version)): Path<(ItemId, VersionId)>,
     request: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let item = state.owned(me.user.id, id).await?;
+    let (item, _) = state.reach(me.user.id, id, Access::Editor).await?;
     let versions = state.storage.versions(id).await?;
     let version = versions
         .into_iter()
@@ -754,9 +927,13 @@ async fn restore_version(
     Authenticated(me): Authenticated,
     Path((id, version)): Path<(ItemId, VersionId)>,
 ) -> ItemResult {
-    state.owned(me.user.id, id).await?;
-    let restored = state.storage.restore_version(id, version).await?;
-    Ok(Json(state.view(me.user.id, restored).await?))
+    let (item, access) = state.reach(me.user.id, id, Access::Editor).await?;
+    let restored = state
+        .storage
+        .restore_version(id, version)
+        .await
+        .map_err(|err| space_error(err, item.owner, me.user.id))?;
+    Ok(Json(state.view(me.user.id, restored, access).await?))
 }
 
 /// `GET /trash`: what the user has deleted, newest first.
@@ -765,7 +942,9 @@ async fn trash(
     Authenticated(me): Authenticated,
 ) -> Result<Json<Vec<ItemView>>, ApiError> {
     let items = state.storage.trash(me.user.id).await?;
-    Ok(Json(state.views(me.user.id, items).await?))
+    Ok(Json(
+        state.child_views(me.user.id, items, Access::Owner).await?,
+    ))
 }
 
 /// `DELETE /trash`: deletes everything in the trash for good.
@@ -783,7 +962,7 @@ async fn delete_forever(
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
 ) -> Result<StatusCode, ApiError> {
-    state.owned(me.user.id, id).await?;
+    state.reach(me.user.id, id, Access::Owner).await?;
     state.storage.delete_forever(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -799,6 +978,10 @@ async fn usage(
 #[derive(Deserialize)]
 struct NewUpload {
     size: u64,
+    /// The folder it will finish in. It counts toward the quota of that
+    /// folder's owner, and has to finish in their storage. Leave it out for
+    /// the user's own storage.
+    parent: Option<ItemId>,
 }
 
 /// `POST /uploads`: starts a resumable upload of `size` bytes. Send the
@@ -809,7 +992,21 @@ async fn start_upload(
     Authenticated(me): Authenticated,
     Json(request): Json<NewUpload>,
 ) -> Result<(StatusCode, Json<UploadView>), ApiError> {
-    let upload = state.storage.start_upload(me.user.id, request.size).await?;
+    let owner = match request.parent {
+        Some(parent) => {
+            state
+                .reach(me.user.id, parent, Access::Editor)
+                .await?
+                .0
+                .owner
+        }
+        None => me.user.id,
+    };
+    let upload = state
+        .storage
+        .start_upload_by(owner, me.user.id, request.size)
+        .await
+        .map_err(|err| space_error(err, owner, me.user.id))?;
     Ok((StatusCode::CREATED, Json(upload.into())))
 }
 
@@ -863,12 +1060,15 @@ async fn finish_upload(
     Json(request): Json<FinishUpload>,
 ) -> ItemResult {
     owned_upload(&state, me.user.id, id).await?;
-    state.owned(me.user.id, request.parent).await?;
+    let (folder, access) = state
+        .reach(me.user.id, request.parent, Access::Editor)
+        .await?;
     let file = state
         .storage
         .finish_upload(id, request.parent, &request.name)
-        .await?;
-    Ok(Json(state.view(me.user.id, file).await?))
+        .await
+        .map_err(|err| space_error(err, folder.owner, me.user.id))?;
+    Ok(Json(state.view(me.user.id, file, access).await?))
 }
 
 /// `DELETE /uploads/{id}`: stops an upload and deletes what arrived.
@@ -884,7 +1084,7 @@ async fn cancel_upload(
 
 async fn owned_upload(state: &DriveState, user: UserId, id: UploadId) -> Result<Upload, ApiError> {
     match state.storage.upload(id).await {
-        Ok(upload) if upload.owner == user => Ok(upload),
+        Ok(upload) if upload.started_by == user => Ok(upload),
         Ok(_) | Err(storage::Error::UploadNotFound) => Err(ApiError::not_found()),
         Err(err) => Err(err.into()),
     }

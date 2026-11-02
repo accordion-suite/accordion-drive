@@ -1,4 +1,4 @@
-//! A Drive module mounted the way the server mounts it, with two users.
+//! A Drive module mounted the way the server mounts it, with four users.
 
 // Each test file uses a different part of this module.
 #![allow(dead_code)]
@@ -27,6 +27,9 @@ pub struct Server {
     pub thumbnails: Thumbnails,
     pub alex: Person,
     pub sam: Person,
+    /// Two more, for sharing.
+    pub kim: Person,
+    pub lee: Person,
 }
 
 pub struct Person {
@@ -95,6 +98,8 @@ pub async fn start() -> Server {
     Server {
         alex: person(&identity, "alex").await,
         sam: person(&identity, "sam").await,
+        kim: person(&identity, "kim").await,
+        lee: person(&identity, "lee").await,
         _dir: dir,
         _stop: stop,
         router,

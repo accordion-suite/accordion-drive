@@ -81,7 +81,7 @@ fn add(
 
 /// `name`, or "name (1).ext", "name (2).ext", and so on, whichever isn't
 /// taken yet.
-fn unique(name: &str, taken: &mut HashSet<String>) -> String {
+pub(crate) fn unique(name: &str, taken: &mut HashSet<String>) -> String {
     if taken.insert(name.to_owned()) {
         return name.to_owned();
     }
