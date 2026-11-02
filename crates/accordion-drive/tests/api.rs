@@ -1024,3 +1024,95 @@ async fn sends_thumbnails_once_core_makes_them() {
         .await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn previews_office_documents_once_core_makes_them() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // A real document, made with LibreOffice outside the sandbox.
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("budget.csv");
+    std::fs::write(&source, "Month,Food\nJanuary,420\n").unwrap();
+    let made = std::process::Command::new("soffice")
+        .arg(format!(
+            "-env:UserInstallation=file://{}",
+            dir.path().join("libreoffice").display()
+        ))
+        .args([
+            "--headless",
+            "--norestore",
+            "--convert-to",
+            "xlsx",
+            "--outdir",
+        ])
+        .arg(dir.path())
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(made.status.success());
+    let budget = server
+        .send(
+            "PUT",
+            &format!("/api/drive/items/{top}/children/Budget%202026.xlsx"),
+            &[("authorization", &alex.bearer)],
+            std::fs::read(dir.path().join("budget.xlsx")).unwrap(),
+        )
+        .await
+        .json();
+    let id = budget["id"].as_str().unwrap().to_owned();
+
+    // Core hasn't made it yet.
+    assert_eq!(budget["preview"], json!(null));
+    let reply = server
+        .api(alex, "GET", &format!("/items/{id}/preview"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let hash =
+        accordion_core::storage::ContentHash::from_hex(budget["sha256"].as_str().unwrap()).unwrap();
+    assert!(server.thumbnails.make_now(hash).await.unwrap());
+    let item = server
+        .api(alex, "GET", &format!("/items/{id}"), None)
+        .await
+        .json();
+    assert_eq!(item["preview"], json!("document"));
+    assert_eq!(item["preview_partial"], json!(false));
+    assert_eq!(item["thumbnail"], json!("picture"));
+
+    let reply = server
+        .api(alex, "GET", &format!("/items/{id}/preview"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.headers["content-type"], "application/pdf");
+    assert_eq!(
+        reply.headers["content-disposition"],
+        "inline; filename=\"Budget 2026.pdf\"; filename*=UTF-8''Budget%202026.pdf"
+    );
+    assert_eq!(
+        reply.headers["content-security-policy"],
+        "frame-ancestors 'self'"
+    );
+    assert!(reply.body.starts_with(b"%PDF-"));
+
+    // Browsers' PDF viewers ask for parts of long ones.
+    let reply = server
+        .send(
+            "GET",
+            &format!("/api/drive/items/{id}/preview"),
+            &[("authorization", &alex.bearer), ("range", "bytes=0-3")],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(&reply.body[..], b"%PDF");
+
+    // Nobody else reaches it.
+    let reply = server
+        .api(&server.sam, "GET", &format!("/items/{id}/preview"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+}

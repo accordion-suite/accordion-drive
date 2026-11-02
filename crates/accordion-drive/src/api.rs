@@ -95,9 +95,13 @@ pub(crate) struct ItemView {
     version: Option<VersionId>,
     size: Option<u64>,
     sha256: Option<String>,
-    /// For files the browser can show itself: "image" or "pdf". The web
-    /// app opens these from `/items/{id}/preview`.
+    /// For files the browser can show itself: "image", "pdf", "video", or
+    /// "audio", or "document" for an Office document that core has made a
+    /// PDF of. The web app opens these from `/items/{id}/preview`.
     preview: Option<&'static str>,
+    /// For a document: whether its preview stops at its first pages, so the
+    /// document may go on past them.
+    preview_partial: bool,
     /// What `/items/{id}/thumbnail` has for the file yet: "picture", a small
     /// WebP, or "text", its first lines. Core makes them in the background,
     /// so a new photo gets one soon.
@@ -150,12 +154,16 @@ impl ItemView {
             ItemKind::Folder => ("folder", None, None),
             ItemKind::File { version, blob } => ("file", Some(version), Some(blob)),
         };
-        let preview = blob.and(preview(&item.name)).map(|preview| match preview {
-            Preview::Image(_) => "image",
-            Preview::Pdf => "pdf",
-            Preview::Video(_) => "video",
-            Preview::Audio(_) => "audio",
-        });
+        let document = blob.and_then(|blob| thumbnails.preview(blob.hash));
+        let preview = match (blob.and(preview(&item.name)), &document) {
+            (Some(Preview::Image(_)), _) => Some("image"),
+            (Some(Preview::Pdf), _) => Some("pdf"),
+            (Some(Preview::Video(_)), _) => Some("video"),
+            (Some(Preview::Audio(_)), _) => Some("audio"),
+            (None, Some(_)) => Some("document"),
+            (None, None) => None,
+        };
+        let preview_partial = document.is_some_and(|document| document.partial);
         let thumbnail = blob
             .and_then(|blob| thumbnails.find(blob.hash))
             .and_then(|thumbnail| match thumbnail.kind {
@@ -173,6 +181,7 @@ impl ItemView {
             size: blob.map(|blob| blob.size),
             sha256: blob.map(|blob| blob.hash.to_hex()),
             preview,
+            preview_partial,
             thumbnail,
             created_at: item.created_at,
             modified_at: item.modified_at,
@@ -760,7 +769,8 @@ async fn download(
 }
 
 /// `GET /items/{id}/preview`: the file as a type the browser shows itself,
-/// for the kinds of file that `preview` allows.
+/// for the kinds of file that `preview` allows, or an Office document's
+/// preview, a PDF of its first pages, once core has made one.
 async fn preview_file(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
@@ -782,10 +792,36 @@ async fn preview_file(
         // won't run in a sandbox, so PDFs go without one.
         Some(Preview::Pdf) => ("application/pdf", "frame-ancestors 'self'"),
         None => {
-            return Err(ApiError::new(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "Accordion can't show this kind of file. Download it instead.",
-            ));
+            let Some(document) = state.thumbnails.preview(blob.hash) else {
+                return Err(ApiError::new(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "Accordion can't show this kind of file. Download it instead.",
+                ));
+            };
+            // Previews of contents that are gone are removed now and then.
+            let gone = || ApiError::new(StatusCode::NOT_FOUND, "This file doesn't have a preview.");
+            let file = tokio::fs::File::open(&document.path)
+                .await
+                .map_err(|_| gone())?;
+            let size = file.metadata().await.map_err(|_| gone())?.len();
+            let stem = item
+                .name
+                .rsplit_once('.')
+                .map_or(&*item.name, |(stem, _)| stem);
+            let disposition = disposition("inline", &format!("{stem}.pdf"));
+            // Both the contents and the preview's length name this version
+            // of it, since a newer LibreOffice may make another.
+            let etag = format!("\"{}-{size}\"", blob.hash);
+            return send(
+                &request,
+                file,
+                size,
+                &etag,
+                "application/pdf",
+                disposition,
+                "frame-ancestors 'self'",
+            )
+            .await;
         }
     };
     let disposition = disposition("inline", &item.name);
@@ -1189,30 +1225,53 @@ async fn send_file(
     policy: &'static str,
 ) -> Result<Response, ApiError> {
     let etag = format!("\"{}\"", blob.hash);
+    let file = state.storage.open_contents(blob.hash).await?;
+    send(
+        request,
+        file,
+        blob.size,
+        &etag,
+        content_type,
+        disposition,
+        policy,
+    )
+    .await
+}
+
+/// Sends an open file of `size` bytes, or the part a `Range` header asks
+/// for.
+async fn send(
+    request: &HeaderMap,
+    mut file: tokio::fs::File,
+    size: u64,
+    etag: &str,
+    content_type: &'static str,
+    disposition: HeaderValue,
+    policy: &'static str,
+) -> Result<Response, ApiError> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(CONTENT_DISPOSITION, disposition);
     headers.insert(
         ETAG,
-        HeaderValue::try_from(&etag).expect("hex is valid header text"),
+        HeaderValue::try_from(etag).expect("hex is valid header text"),
     );
     headers.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     headers.insert(CONTENT_SECURITY_POLICY, HeaderValue::from_static(policy));
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-cache"));
-    let range = match requested_range(request, blob.size, &etag) {
+    let range = match requested_range(request, size, etag) {
         Ok(range) => range,
         Err(Unsatisfiable) => {
             headers.insert(
                 CONTENT_RANGE,
-                HeaderValue::try_from(format!("bytes */{}", blob.size)).expect("digits are valid"),
+                HeaderValue::try_from(format!("bytes */{size}")).expect("digits are valid"),
             );
             return Ok((StatusCode::RANGE_NOT_SATISFIABLE, headers).into_response());
         }
     };
-    let mut file = state.storage.open_contents(blob.hash).await?;
     let Some(range) = range else {
-        headers.insert(CONTENT_LENGTH, HeaderValue::from(blob.size));
+        headers.insert(CONTENT_LENGTH, HeaderValue::from(size));
         return Ok((headers, Body::from_stream(ReaderStream::new(file))).into_response());
     };
     file.seek(io::SeekFrom::Start(range.start))
@@ -1221,13 +1280,8 @@ async fn send_file(
     headers.insert(CONTENT_LENGTH, HeaderValue::from(range.end - range.start));
     headers.insert(
         CONTENT_RANGE,
-        HeaderValue::try_from(format!(
-            "bytes {}-{}/{}",
-            range.start,
-            range.end - 1,
-            blob.size
-        ))
-        .expect("digits are valid"),
+        HeaderValue::try_from(format!("bytes {}-{}/{size}", range.start, range.end - 1))
+            .expect("digits are valid"),
     );
     let part = file.take(range.end - range.start);
     Ok((
