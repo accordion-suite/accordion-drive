@@ -92,9 +92,12 @@ pub async fn start() -> Server {
         )
         .await
         .unwrap();
-    let router = Router::new()
+    let mut router = Router::new()
         .nest("/api/drive", started.routes.api.unwrap())
         .nest_service("/dav/drive", started.routes.dav.unwrap());
+    for (name, dav) in started.routes.more_dav {
+        router = router.nest_service(&format!("/dav/{name}"), dav);
+    }
     Server {
         alex: person(&identity, "alex").await,
         sam: person(&identity, "sam").await,
@@ -198,6 +201,21 @@ impl Server {
                 .await
             }
         }
+    }
+
+    /// A request to `/dav/shared`, what others shared, as `person`.
+    pub async fn shared_dav(
+        &self,
+        person: &Person,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: impl Into<Body>,
+    ) -> Reply {
+        let mut all = vec![("authorization", person.basic.as_str())];
+        all.extend_from_slice(headers);
+        self.send(method, &format!("/dav/shared{path}"), &all, body)
+            .await
     }
 
     /// A WebDAV request as `person`.

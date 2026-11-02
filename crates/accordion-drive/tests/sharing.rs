@@ -652,7 +652,7 @@ async fn viewers_copy_into_their_own_drive() {
 }
 
 #[tokio::test]
-async fn webdav_shows_only_your_own_files() {
+async fn webdav_my_drive_shows_only_your_own_files() {
     let s = &start().await;
     files(s, 0).await;
     let reply = s
@@ -662,5 +662,215 @@ async fn webdav_shows_only_your_own_files() {
     let reply = s
         .dav(&s.sam, "GET", "/Holiday%200/beach.jpg", &[], "")
         .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+}
+
+/// The names in a PROPFIND reply, decoded, without the folder itself.
+fn listed(reply: &Reply, folder: &str) -> Vec<String> {
+    let text = reply.text();
+    let mut names: Vec<String> = text
+        .split("<D:href>")
+        .skip(1)
+        .filter_map(|rest| rest.split("</D:href>").next())
+        .filter(|href| href.trim_end_matches('/') != folder.trim_end_matches('/'))
+        .map(|href| {
+            let name = href.trim_end_matches('/').rsplit('/').next().unwrap();
+            percent_decode(name)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() + 1 {
+            out.push(u8::from_str_radix(&text[i + 1..i + 3], 16).unwrap());
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
+#[tokio::test]
+async fn webdav_shared_lists_whats_shared_with_you() {
+    let s = &start().await;
+    let f = files(s, 0).await;
+    let reply = s
+        .shared_dav(&s.kim, "PROPFIND", "/", &[("depth", "1")], "")
+        .await;
+    assert_eq!(reply.status, StatusCode::MULTI_STATUS, "{}", reply.text());
+    assert_eq!(listed(&reply, "/dav/shared/"), ["Holiday 0"]);
+    // Lee has nothing shared, and Alex's own files aren't here.
+    for person in [&s.lee, &s.alex] {
+        let reply = s
+            .shared_dav(person, "PROPFIND", "/", &[("depth", "1")], "")
+            .await;
+        assert_eq!(listed(&reply, "/dav/shared/"), Vec::<String>::new());
+    }
+
+    // Sam shares a folder with the same name with Kim. The older share
+    // keeps its name, and the newer one gets its owner's.
+    let sams = id(s.api(&s.sam, "GET", "/top", None).await);
+    let theirs = id(s
+        .api(
+            &s.sam,
+            "POST",
+            &format!("/items/{sams}/children"),
+            Some(json!({ "name": "Holiday 0" })),
+        )
+        .await);
+    let reply = s
+        .api(
+            &s.sam,
+            "PUT",
+            &format!("/items/{theirs}/shares/{}", s.kim.id),
+            Some(json!({ "level": "viewer" })),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let reply = s
+        .shared_dav(&s.kim, "PROPFIND", "/", &[("depth", "1")], "")
+        .await;
+    assert_eq!(
+        listed(&reply, "/dav/shared/"),
+        ["Holiday 0", "Holiday 0 (sam)"]
+    );
+
+    // Inside, the folder's own files.
+    let reply = s
+        .shared_dav(&s.kim, "PROPFIND", "/Holiday%200/", &[("depth", "1")], "")
+        .await;
+    assert_eq!(listed(&reply, "/dav/shared/Holiday%200/"), ["beach.jpg"]);
+    let reply = s
+        .shared_dav(&s.kim, "GET", "/Holiday%200/beach.jpg", &[], "")
+        .await;
+    assert_eq!(reply.text(), "second");
+
+    // Removing Kim works on the next request.
+    s.api(
+        &s.alex,
+        "DELETE",
+        &format!("/items/{}/shares/{}", f.holiday, s.kim.id),
+        None,
+    )
+    .await;
+    let reply = s
+        .shared_dav(&s.kim, "GET", "/Holiday%200/beach.jpg", &[], "")
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn webdav_shared_follows_each_persons_access() {
+    let s = &start().await;
+    let f = files(s, 0).await;
+    let photo = "/Holiday%200/beach.jpg";
+
+    // Kim, a viewer, can read but change nothing.
+    let kim = &s.kim;
+    let refused = [
+        s.shared_dav(kim, "PUT", "/Holiday%200/new.txt", &[], "new")
+            .await,
+        s.shared_dav(kim, "PUT", photo, &[], "changed").await,
+        s.shared_dav(kim, "MKCOL", "/Holiday%200/New", &[], "")
+            .await,
+        s.shared_dav(kim, "DELETE", photo, &[], "").await,
+        s.shared_dav(
+            kim,
+            "MOVE",
+            photo,
+            &[("destination", "/dav/shared/Holiday%200/moved.jpg")],
+            "",
+        )
+        .await,
+    ];
+    for reply in refused {
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.text());
+    }
+    assert_eq!(
+        s.shared_dav(kim, "GET", photo, &[], "").await.text(),
+        "second"
+    );
+
+    // Sam, an editor, can add, rename, and delete inside, but can't add to
+    // the list of shares itself.
+    let sam = &s.sam;
+    let reply = s
+        .shared_dav(sam, "PUT", "/Holiday%200/from%20sam.txt", &[], "hello")
+        .await;
+    assert!(
+        reply.status.is_success(),
+        "{}: {}",
+        reply.status,
+        reply.text()
+    );
+    let reply = s
+        .shared_dav(sam, "MKCOL", "/Holiday%200/Sam's", &[], "")
+        .await;
+    assert!(reply.status.is_success(), "{}", reply.status);
+    let reply = s
+        .shared_dav(
+            sam,
+            "MOVE",
+            "/Holiday%200/from%20sam.txt",
+            &[("destination", "/dav/shared/Holiday%200/Sam's/hello.txt")],
+            "",
+        )
+        .await;
+    assert!(reply.status.is_success(), "{}", reply.status);
+    let reply = s.shared_dav(sam, "MKCOL", "/Elsewhere", &[], "").await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    let reply = s.shared_dav(sam, "PUT", "/loose.txt", &[], "x").await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+
+    // What Sam adds is Alex's, and what Sam deletes goes to Alex's trash.
+    let inside = s
+        .api(
+            &s.alex,
+            "GET",
+            &format!("/items/{}/children", f.holiday),
+            None,
+        )
+        .await
+        .json();
+    let names: Vec<_> = inside
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["name"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(names, ["Sam's", "beach.jpg"]);
+    let reply = s.shared_dav(sam, "DELETE", photo, &[], "").await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    let trash = s.api(&s.alex, "GET", "/trash", None).await.json();
+    assert!(
+        trash
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == f.photo.as_str())
+    );
+
+    // Nothing moves from the shared folder into Sam's own Drive.
+    let reply = s
+        .shared_dav(
+            sam,
+            "MOVE",
+            "/Holiday%200/Sam's",
+            &[("destination", "/dav/drive/Sam's")],
+            "",
+        )
+        .await;
+    assert!(!reply.status.is_success(), "{}", reply.status);
+
+    // Lee sees nothing at all.
+    let reply = s.shared_dav(&s.lee, "GET", photo, &[], "").await;
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
 }

@@ -58,14 +58,19 @@ impl Module for Drive {
                 stars: stars::Stars::new(services.db.clone()),
                 settings: settings::Settings::new(services.db),
                 identity: services.identity,
-                dav: Arc::new(dav::handler(services.storage.clone())),
+                dav: Arc::new(dav::handler(
+                    services.storage.clone(),
+                    dav::Address::MyDrive,
+                )),
+                shared_dav: Arc::new(dav::handler(services.storage.clone(), dav::Address::Shared)),
                 storage: services.storage,
                 thumbnails: services.thumbnails,
             };
             Ok(Started {
                 routes: Routes {
                     api: Some(api::routes(state.clone())),
-                    dav: Some(dav::routes(state)),
+                    dav: Some(dav::routes(state.clone(), dav::Address::MyDrive)),
+                    more_dav: vec![(dav::SHARED, dav::routes(state, dav::Address::Shared))],
                     pages: None,
                 },
                 background: None,
@@ -82,6 +87,8 @@ struct DriveState {
     storage: Storage,
     thumbnails: Thumbnails,
     dav: Arc<dav_server::DavHandler<dav::Credentials>>,
+    /// For `/dav/shared`.
+    shared_dav: Arc<dav_server::DavHandler<dav::Credentials>>,
 }
 
 impl FromRef<DriveState> for Identity {

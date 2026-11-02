@@ -8,12 +8,13 @@ This repo is part of [Accordion](https://github.com/accordion-suite/accordion), 
 
 Drive is a library crate, `accordion-drive`, that the server in the `accordion` repo builds in. It implements the `Module` trait from `accordion-module` ([decision 7](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0007-module-interface.md)).
 
-Drive keeps no files of its own. Core's storage service holds every file, version, and the trash ([decision 6](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0006-file-storage.md)), and Drive is how people reach them. Each person sees only their own files. Sharing is planned.
+Drive keeps no files of its own. Core's storage service holds every file, version, and the trash ([decision 6](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0006-file-storage.md)), and Drive is how people reach them. People see their own files and what others shared with them as viewers or editors. Core decides what each person may do with each item, and every address asks it ([decision 16](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0016-sharing.md)).
 
 | Path | What it's for | How it signs in |
 |---|---|---|
 | `/api/drive/` | The JSON API, described in `src/api.rs` | Session cookie or bearer token |
 | `/dav/drive/` | WebDAV, with each person's top folder at the root | Username and app password |
+| `/dav/shared/` | WebDAV, with what others shared with each person at the root. If two shared items have the same name, the newer one gets its owner's name, such as "Holiday (Alex)" | Username and app password |
 
 A few things work differently from a plain file server:
 

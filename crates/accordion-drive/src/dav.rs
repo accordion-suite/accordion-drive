@@ -1,12 +1,18 @@
-//! `/dav/drive`: WebDAV, so people can open Drive in File Explorer on
-//! Windows, Finder on a Mac, file managers on Linux, and phone apps that
-//! speak WebDAV.
+//! WebDAV, so people can open Drive in File Explorer on Windows, Finder on a
+//! Mac, file managers on Linux, and phone apps that speak WebDAV.
 //!
-//! Clients sign in with their username and an app password (decision 3),
-//! and see their own top folder at `/dav/drive/`. The `dav-server` crate
-//! handles the protocol, and [`DriveFs`] connects it to core's storage.
+//! Clients sign in with their username and an app password (decision 3).
+//! There are two addresses, each of which a client can map as a drive:
 //!
-//! Two things differ from a plain file system:
+//! - `/dav/drive/` is the person's own top folder, My Drive.
+//! - `/dav/shared/` is what others shared with them (decision 16). Each
+//!   shared file or folder is at the top, by its name, with its owner's name
+//!   added if two have the same name, such as "Holiday (Alex)". What each
+//!   person may do inside follows their access, as in the web app: viewers
+//!   only read, and editors also save, rename, move, and delete.
+//!
+//! The `dav-server` crate handles the protocol, and [`DriveFs`] connects it
+//! to core's storage. Two things differ from a plain file system:
 //!
 //! - **Deleting moves to the trash.** A folder goes to the trash whole, so
 //!   restoring it brings everything inside back. `dav-server` would delete
@@ -17,13 +23,14 @@
 //!   support locks, but nothing here needs them: every save is kept as a
 //!   version, so two people saving at once can't lose either copy.
 
+use std::collections::HashSet;
 use std::io::{self, SeekFrom};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use accordion_core::identity::UsingAppPassword;
-use accordion_core::storage::{self, Item, ItemKind, Storage};
+use accordion_core::storage::{self, Access, Item, ItemKind, Storage};
 use accordion_module::{ApiError, DavUser};
 use accordion_types::{ItemId, UserId};
 use axum::Router;
@@ -45,10 +52,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::io::StreamReader;
 
-use crate::{DriveState, time};
+use crate::{DriveState, archive, time};
 
-/// Where the server mounts Drive's WebDAV routes (decision 7).
-const PREFIX: &str = "/dav/drive";
+/// The name of the second address, for what others shared, at
+/// `/dav/shared`.
+pub(crate) const SHARED: &str = "shared";
 
 /// How much of a file each read sends. dav-server's default is 16 KB, and
 /// each read is a trip to tokio's blocking threads, so downloads spent more
@@ -56,31 +64,69 @@ const PREFIX: &str = "/dav/drive";
 /// a Raspberry Pi. 256 KB reaches 1.3 GB/s, and larger reads were no faster.
 const READ_SIZE: usize = 256 * 1024;
 
-/// Who a request is for, found once per request.
-#[derive(Clone)]
-pub(crate) struct Credentials {
-    owner: UserId,
-    top: ItemId,
+/// Which of Drive's WebDAV addresses a request came to.
+#[derive(Clone, Copy)]
+pub(crate) enum Address {
+    /// `/dav/drive`, where the server mounts Drive's own WebDAV routes
+    /// (decision 7).
+    MyDrive,
+    /// `/dav/shared`.
+    Shared,
 }
 
-pub(crate) fn handler(storage: Storage) -> DavHandler<Credentials> {
+impl Address {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::MyDrive => "/dav/drive",
+            Self::Shared => "/dav/shared",
+        }
+    }
+}
+
+/// Who a request is for, and what its address holds, found once per
+/// request.
+#[derive(Clone)]
+pub(crate) struct Credentials {
+    user: UserId,
+    place: Place,
+}
+
+#[derive(Clone)]
+enum Place {
+    /// The user's own top folder.
+    MyDrive(ItemId),
+    /// What others shared with the user, each by the name it shows.
+    Shared(Arc<Vec<(String, Item)>>),
+}
+
+/// What a path names.
+enum Target {
+    /// The top of `/dav/shared`, which lists what's shared. Nothing can be
+    /// added to it, and it isn't anyone's folder.
+    SharedList,
+    Item(Box<Item>, Access),
+}
+
+pub(crate) fn handler(storage: Storage, address: Address) -> DavHandler<Credentials> {
     DavHandler::builder()
         .filesystem(Box::new(DriveFs { storage }))
         .locksystem(FakeLs::new())
-        .strip_prefix(PREFIX)
+        .strip_prefix(address.prefix())
         .read_buf_size(READ_SIZE)
         .build_handler()
 }
 
-pub(crate) fn routes(state: DriveState) -> Router {
-    Router::new().fallback(serve).with_state(state)
+pub(crate) fn routes(state: DriveState, address: Address) -> Router {
+    Router::new()
+        .fallback(
+            move |State(state): State<DriveState>,
+                  OriginalUri(uri): OriginalUri,
+                  request: Request| { serve(state, address, uri, request) },
+        )
+        .with_state(state)
 }
 
-async fn serve(
-    State(state): State<DriveState>,
-    OriginalUri(uri): OriginalUri,
-    request: Request,
-) -> Response {
+async fn serve(state: DriveState, address: Address, uri: Uri, request: Request) -> Response {
     if request.method() == Method::OPTIONS && !request.headers().contains_key(AUTHORIZATION) {
         return discovery();
     }
@@ -89,7 +135,7 @@ async fn serve(
         Ok(DavUser(using)) => using,
         Err(rejection) => return rejection,
     };
-    signed_in(state, using, uri, Request::from_parts(parts, body))
+    signed_in(state, address, using, uri, Request::from_parts(parts, body))
         .await
         .into_response()
 }
@@ -115,51 +161,104 @@ fn discovery() -> Response {
 
 async fn signed_in(
     state: DriveState,
+    address: Address,
     using: UsingAppPassword,
     uri: Uri,
     request: Request,
 ) -> Result<Response, ApiError> {
-    let owner = using.user.id;
-    let top = state.storage.top_folder(owner).await?;
+    let user = using.user.id;
+    let place = match address {
+        Address::MyDrive => Place::MyDrive(state.storage.top_folder(user).await?),
+        Address::Shared => Place::Shared(Arc::new(shared_names(&state, user).await?)),
+    };
+    let credentials = Credentials { user, place };
     // The server strips the prefix before routing, but the links that
     // dav-server sends back must include it.
     let (mut parts, body) = request.into_parts();
     parts.uri = uri;
     if parts.method == Method::DELETE {
-        return delete(&state.storage, top, &parts.uri).await;
+        let fs = DriveFs {
+            storage: state.storage.clone(),
+        };
+        return Ok(delete(&fs, &credentials, address, &parts.uri).await);
     }
-    let response = state
-        .dav
+    let dav = match address {
+        Address::MyDrive => &state.dav,
+        Address::Shared => &state.shared_dav,
+    };
+    let response = dav
         .handle_guarded(
             Request::from_parts(parts, body),
             using.user.username,
-            Credentials { owner, top },
+            credentials,
         )
         .await;
     Ok(response.map(Body::new))
 }
 
-/// Moves what `uri` names to the trash, in one piece.
-async fn delete(storage: &Storage, top: ItemId, uri: &Uri) -> Result<Response, ApiError> {
-    let names = DavPath::new(uri.path())
-        .ok()
-        .and_then(|mut path| {
-            path.set_prefix(PREFIX).ok()?;
-            names(&path).ok()
-        })
-        .ok_or_else(ApiError::not_found)?;
-    if names.is_empty() {
-        return Err(storage::Error::TopFolder.into());
+/// What others shared with `user`, each with the name `/dav/shared` shows.
+/// The oldest share keeps its own name, so adding a share never renames one
+/// that a client already shows. A later one with the same name gets its
+/// owner's name, such as "Holiday (Alex)" or "Notes (Alex).txt".
+async fn shared_names(state: &DriveState, user: UserId) -> Result<Vec<(String, Item)>, ApiError> {
+    let mut shared = state.storage.shared_with(user).await?;
+    shared.reverse();
+    let mut taken = HashSet::new();
+    let mut named = Vec::with_capacity(shared.len());
+    for shared in shared {
+        let item = shared.item;
+        let name = if taken.contains(&item.name) {
+            let owner = state
+                .identity
+                .user(item.owner)
+                .await?
+                .map(|owner| owner.display_name)
+                .unwrap_or_default();
+            let (stem, extension) = match (&item.kind, item.name.rfind('.')) {
+                (ItemKind::File { .. }, Some(dot)) if dot > 0 => item.name.split_at(dot),
+                _ => (item.name.as_str(), ""),
+            };
+            archive::unique(&format!("{stem} ({owner}){extension}"), &mut taken)
+        } else {
+            archive::unique(&item.name, &mut taken)
+        };
+        named.push((name, item));
     }
-    let item = storage
-        .find(top, names)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if item.kind == ItemKind::Folder {
-        gather(storage, &item).await?;
+    Ok(named)
+}
+
+/// Moves what `uri` names to the trash, in one piece. Someone else's items
+/// go to their owner's trash.
+async fn delete(fs: &DriveFs, credentials: &Credentials, address: Address, uri: &Uri) -> Response {
+    let names = DavPath::new(uri.path()).ok().and_then(|mut path| {
+        path.set_prefix(address.prefix()).ok()?;
+        names(&path).ok()
+    });
+    let Some(names) = names else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let status = |err: FsError| match err {
+        FsError::NotFound => StatusCode::NOT_FOUND,
+        FsError::Forbidden => StatusCode::FORBIDDEN,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    let item = match fs.target_of(credentials, names).await {
+        Ok(Target::Item(item, _)) if item.parent.is_none() => {
+            return ApiError::from(storage::Error::TopFolder).into_response();
+        }
+        Ok(Target::Item(item, access)) if access >= Access::Editor => *item,
+        Ok(_) => return StatusCode::FORBIDDEN.into_response(),
+        Err(err) => return status(err).into_response(),
+    };
+    if item.kind == ItemKind::Folder
+        && let Err(err) = gather(&fs.storage, &item).await
+    {
+        return ApiError::from(err).into_response();
     }
-    storage.delete(item.id).await?;
-    Ok(StatusCode::NO_CONTENT.into_response())
+    match fs.storage.delete(item.id).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => ApiError::from(err).into_response(),
+    }
 }
 
 /// How long before a folder is deleted that what's deleted from it counts
@@ -240,29 +339,77 @@ struct DriveFs {
 }
 
 impl DriveFs {
-    async fn find(&self, top: ItemId, path: &DavPath) -> FsResult<Item> {
-        self.storage
-            .find(top, names(path)?)
-            .await
-            .map_err(fs_error)?
-            .ok_or(FsError::NotFound)
+    async fn target(&self, credentials: &Credentials, path: &DavPath) -> FsResult<Target> {
+        self.target_of(credentials, names(path)?).await
     }
 
-    /// The folder that a new item at `path` goes into, and the item's name.
-    async fn parent_and_name(&self, top: ItemId, path: &DavPath) -> FsResult<(Item, String)> {
-        let mut names = names(path)?;
-        // The top folder has no parent, and can't be replaced.
-        let name = names.pop().ok_or(FsError::Forbidden)?;
-        let parent = self
+    async fn target_of(
+        &self,
+        credentials: &Credentials,
+        mut names: Vec<String>,
+    ) -> FsResult<Target> {
+        let (from, access) = match &credentials.place {
+            Place::MyDrive(top) => (*top, Some(Access::Owner)),
+            Place::Shared(shared) => {
+                if names.is_empty() {
+                    return Ok(Target::SharedList);
+                }
+                let first = names.remove(0);
+                let (_, item) = shared
+                    .iter()
+                    .find(|(name, _)| *name == first)
+                    .ok_or(FsError::NotFound)?;
+                (item.id, None)
+            }
+        };
+        let item = self
             .storage
-            .find(top, names)
+            .find(from, names)
             .await
             .map_err(fs_error)?
             .ok_or(FsError::NotFound)?;
-        if parent.kind != ItemKind::Folder {
-            return Err(FsError::NotFound);
+        // Asked again for each request, so removing someone works on their
+        // next one. A share on a folder inside can give them more.
+        let access = match access {
+            Some(access) => access,
+            None => self
+                .storage
+                .access(credentials.user, item.id)
+                .await
+                .map_err(fs_error)?
+                .ok_or(FsError::NotFound)?,
+        };
+        Ok(Target::Item(Box::new(item), access))
+    }
+
+    /// The item at `path`, if the user may use it at `needed` or above.
+    async fn find(
+        &self,
+        credentials: &Credentials,
+        path: &DavPath,
+        needed: Access,
+    ) -> FsResult<Item> {
+        match self.target(credentials, path).await? {
+            Target::Item(item, access) if access >= needed => Ok(*item),
+            _ => Err(FsError::Forbidden),
         }
-        Ok((parent, name))
+    }
+
+    /// The folder that a new item at `path` goes into, which the user may
+    /// add to, and the item's name.
+    async fn parent_and_name(
+        &self,
+        credentials: &Credentials,
+        path: &DavPath,
+    ) -> FsResult<(Item, String)> {
+        let mut names = names(path)?;
+        // The top folder has no parent, and can't be replaced.
+        let name = names.pop().ok_or(FsError::Forbidden)?;
+        match self.target_of(credentials, names).await? {
+            Target::Item(parent, _) if parent.kind != ItemKind::Folder => Err(FsError::NotFound),
+            Target::Item(parent, access) if access >= Access::Editor => Ok((*parent, name)),
+            _ => Err(FsError::Forbidden),
+        }
     }
 }
 
@@ -276,7 +423,7 @@ impl GuardedFileSystem<Credentials> for DriveFs {
         Box::pin(async move {
             let writing = options.write || options.append || options.create;
             if !writing {
-                let item = self.find(credentials.top, path).await?;
+                let item = self.find(credentials, path, Access::Viewer).await?;
                 let ItemKind::File { blob, .. } = item.kind else {
                     return Err(FsError::Forbidden);
                 };
@@ -290,9 +437,11 @@ impl GuardedFileSystem<Credentials> for DriveFs {
                     meta: Meta::of(&item),
                 }) as Box<dyn DavFile>);
             }
-            let (parent, name) = self.parent_and_name(credentials.top, path).await?;
-            let exists = match self.find(credentials.top, path).await {
-                Ok(item) if item.kind == ItemKind::Folder => return Err(FsError::Forbidden),
+            let (parent, name) = self.parent_and_name(credentials, path).await?;
+            let exists = match self.target(credentials, path).await {
+                Ok(Target::Item(item, _)) if item.kind == ItemKind::Folder => {
+                    return Err(FsError::Forbidden);
+                }
                 Ok(_) if options.create_new => return Err(FsError::Exists),
                 Err(FsError::NotFound) if !options.create => return Err(FsError::NotFound),
                 Ok(_) => true,
@@ -342,14 +491,24 @@ impl GuardedFileSystem<Credentials> for DriveFs {
         credentials: &'a Credentials,
     ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
         Box::pin(async move {
-            let folder = self.find(credentials.top, path).await?;
-            if folder.kind != ItemKind::Folder {
-                return Err(FsError::Forbidden);
-            }
-            let children = self.storage.children(folder.id).await.map_err(fs_error)?;
-            let entries = children.into_iter().map(|child| {
+            let children: Vec<(String, Item)> = match self.target(credentials, path).await? {
+                Target::SharedList => match &credentials.place {
+                    Place::Shared(shared) => shared.as_ref().clone(),
+                    Place::MyDrive(_) => Vec::new(),
+                },
+                Target::Item(folder, _) if folder.kind == ItemKind::Folder => self
+                    .storage
+                    .children(folder.id)
+                    .await
+                    .map_err(fs_error)?
+                    .into_iter()
+                    .map(|child| (child.name.clone(), child))
+                    .collect(),
+                Target::Item(..) => return Err(FsError::Forbidden),
+            };
+            let entries = children.into_iter().map(|(name, child)| {
                 Ok(Box::new(Entry {
-                    name: child.name.clone().into_bytes(),
+                    name: name.into_bytes(),
                     meta: Meta::of(&child),
                 }) as Box<dyn DavDirEntry>)
             });
@@ -363,8 +522,11 @@ impl GuardedFileSystem<Credentials> for DriveFs {
         credentials: &'a Credentials,
     ) -> FsFuture<'a, Box<dyn DavMetaData>> {
         Box::pin(async move {
-            let item = self.find(credentials.top, path).await?;
-            Ok(Box::new(Meta::of(&item)) as Box<dyn DavMetaData>)
+            let meta = match self.target(credentials, path).await? {
+                Target::SharedList => Meta::shared_list(),
+                Target::Item(item, _) => Meta::of(&item),
+            };
+            Ok(Box::new(meta) as Box<dyn DavMetaData>)
         })
     }
 
@@ -374,7 +536,7 @@ impl GuardedFileSystem<Credentials> for DriveFs {
         credentials: &'a Credentials,
     ) -> FsFuture<'a, ()> {
         Box::pin(async move {
-            let (parent, name) = self.parent_and_name(credentials.top, path).await?;
+            let (parent, name) = self.parent_and_name(credentials, path).await?;
             self.storage
                 .create_folder(parent.id, &name)
                 .await
@@ -406,8 +568,8 @@ impl GuardedFileSystem<Credentials> for DriveFs {
         credentials: &'a Credentials,
     ) -> FsFuture<'a, ()> {
         Box::pin(async move {
-            let item = self.find(credentials.top, from).await?;
-            let (parent, name) = self.parent_and_name(credentials.top, to).await?;
+            let item = self.find(credentials, from, Access::Editor).await?;
+            let (parent, name) = self.parent_and_name(credentials, to).await?;
             self.storage
                 .move_item(item.id, parent.id, &name)
                 .await
@@ -423,11 +585,11 @@ impl GuardedFileSystem<Credentials> for DriveFs {
         credentials: &'a Credentials,
     ) -> FsFuture<'a, ()> {
         Box::pin(async move {
-            let item = self.find(credentials.top, from).await?;
+            let item = self.find(credentials, from, Access::Viewer).await?;
             let ItemKind::File { blob, .. } = item.kind else {
                 return Err(FsError::Forbidden);
             };
-            let (parent, name) = self.parent_and_name(credentials.top, to).await?;
+            let (parent, name) = self.parent_and_name(credentials, to).await?;
             // The copy has the same contents, so storage keeps them once.
             let contents = self
                 .storage
@@ -446,7 +608,7 @@ impl GuardedFileSystem<Credentials> for DriveFs {
         Box::pin(async move {
             let usage = self
                 .storage
-                .usage(credentials.owner)
+                .usage(credentials.user)
                 .await
                 .map_err(fs_error)?;
             Ok((usage.used + usage.uploading, usage.quota))
@@ -460,7 +622,7 @@ impl DriveFs {
     /// destination.
     fn remove<'a>(&'a self, path: &'a DavPath, credentials: &'a Credentials) -> FsFuture<'a, ()> {
         Box::pin(async move {
-            let item = self.find(credentials.top, path).await?;
+            let item = self.find(credentials, path, Access::Editor).await?;
             self.storage.delete(item.id).await.map_err(fs_error)?;
             Ok(())
         })
@@ -477,6 +639,17 @@ struct Meta {
 }
 
 impl Meta {
+    /// The top of `/dav/shared`, which no one changes.
+    fn shared_list() -> Self {
+        Self {
+            folder: true,
+            len: 0,
+            created: UNIX_EPOCH,
+            modified: UNIX_EPOCH,
+            etag: "shared".to_owned(),
+        }
+    }
+
     fn of(item: &Item) -> Self {
         let created = time::parse(&item.created_at).unwrap_or(UNIX_EPOCH);
         let modified = time::parse(&item.modified_at).unwrap_or(created);
