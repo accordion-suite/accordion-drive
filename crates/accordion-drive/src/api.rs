@@ -12,10 +12,12 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::ops::Range;
 
+use accordion_core::events::{Action, NewEvent};
 use accordion_core::storage::{
     self, Access, Blob, Found, Item, ItemKind, Only, Search, Upload, Usage, Version,
 };
 use accordion_core::thumbnails::{ThumbnailKind, Thumbnails};
+use accordion_module::auth::actor;
 use accordion_module::{ApiError, Authenticated};
 use accordion_types::{ItemId, UploadId, UserId, VersionId};
 use axum::body::Body;
@@ -34,7 +36,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::settings::DriveSettings;
-use crate::{DriveState, archive, colors, descriptions, sharing, time};
+use crate::{DriveState, activity, archive, colors, descriptions, sharing, time};
 
 /// Says where a piece of a resumable upload starts. The name follows the
 /// tus protocol, which uses the same header for the same purpose.
@@ -68,6 +70,9 @@ pub(crate) fn routes(state: DriveState) -> Router {
             "/items/{id}/shares/{user}",
             put(sharing::share).delete(sharing::unshare),
         )
+        .route("/items/{id}/activity", get(activity::activity))
+        .route("/notifications", get(activity::notifications))
+        .route("/notifications/read", post(activity::mark_read))
         .route("/shared", get(sharing::shared_with_me))
         .route("/shared-by-me", get(sharing::shared_by_me))
         .route(
@@ -468,7 +473,7 @@ async fn create_folder(
     Json(request): Json<NewFolder>,
 ) -> Result<(StatusCode, Json<ItemView>), ApiError> {
     let (_, access) = state.reach(me.user.id, parent, Access::Editor).await?;
-    let folder = state.storage.create_folder(parent, &request.name).await?;
+    let folder = state.by(&me).create_folder(parent, &request.name).await?;
     Ok((
         StatusCode::CREATED,
         Json(state.view(me.user.id, folder, access).await?),
@@ -486,7 +491,7 @@ async fn write_file(
 ) -> ItemResult {
     let (folder, access) = state.reach(me.user.id, parent, Access::Editor).await?;
     let file = state
-        .storage
+        .by(&me)
         .write_file(parent, &name, reader(body))
         .await
         .map_err(|err| space_error(err, folder.owner, me.user.id))?;
@@ -516,7 +521,7 @@ async fn move_item(
         None => item.parent.ok_or(storage::Error::TopFolder)?,
     };
     let name = request.name.unwrap_or(item.name);
-    let moved = state.storage.move_item(id, parent, &name).await?;
+    let moved = state.by(&me).move_item(id, parent, &name).await?;
     Ok(Json(state.view(me.user.id, moved, access).await?))
 }
 
@@ -527,7 +532,7 @@ async fn trash_item(
     Path(id): Path<ItemId>,
 ) -> ItemResult {
     let (_, access) = state.reach(me.user.id, id, Access::Editor).await?;
-    let deleted = state.storage.delete(id).await?;
+    let deleted = state.by(&me).delete(id).await?;
     Ok(Json(state.view(me.user.id, deleted, access).await?))
 }
 
@@ -538,7 +543,7 @@ async fn restore(
     Path(id): Path<ItemId>,
 ) -> ItemResult {
     let (_, access) = state.reach(me.user.id, id, Access::Owner).await?;
-    let restored = state.storage.restore(id).await?;
+    let restored = state.by(&me).restore(id).await?;
     Ok(Json(state.view(me.user.id, restored, access).await?))
 }
 
@@ -655,7 +660,7 @@ async fn set_description(
     Path(id): Path<ItemId>,
     Json(request): Json<DescriptionBody>,
 ) -> Result<Json<DescriptionBody>, ApiError> {
-    state.reach(me.user.id, id, Access::Editor).await?;
+    let (item, _) = state.reach(me.user.id, id, Access::Editor).await?;
     let description = request.description.trim().to_owned();
     if description.chars().count() > descriptions::MAX_LEN {
         return Err(ApiError::new(
@@ -666,10 +671,20 @@ async fn set_description(
             ),
         ));
     }
-    state
-        .descriptions
-        .set(me.user.id, id, description.clone())
-        .await?;
+    let before = state.descriptions.get(id).await?.unwrap_or_default();
+    if before != description {
+        state
+            .descriptions
+            .set(me.user.id, id, description.clone())
+            .await?;
+        state
+            .events
+            .record(
+                actor(&me),
+                NewEvent::about(Action::DescriptionChanged, id, item.owner),
+            )
+            .await?;
+    }
     Ok(Json(DescriptionBody { description }))
 }
 
@@ -744,7 +759,7 @@ async fn copy(
         }
     };
     let copy = state
-        .storage
+        .by(&me)
         .copy_file(id, parent.id, &name)
         .await
         .map_err(|err| space_error(err, parent.owner, me.user.id))?;
@@ -1127,7 +1142,7 @@ async fn restore_version(
 ) -> ItemResult {
     let (item, access) = state.reach(me.user.id, id, Access::Editor).await?;
     let restored = state
-        .storage
+        .by(&me)
         .restore_version(id, version)
         .await
         .map_err(|err| space_error(err, item.owner, me.user.id))?;
@@ -1150,7 +1165,7 @@ async fn empty_trash(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
 ) -> Result<StatusCode, ApiError> {
-    state.storage.empty_trash(me.user.id).await?;
+    state.by(&me).empty_trash(me.user.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1161,7 +1176,7 @@ async fn delete_forever(
     Path(id): Path<ItemId>,
 ) -> Result<StatusCode, ApiError> {
     state.reach(me.user.id, id, Access::Owner).await?;
-    state.storage.delete_forever(id).await?;
+    state.by(&me).delete_forever(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1262,7 +1277,7 @@ async fn finish_upload(
         .reach(me.user.id, request.parent, Access::Editor)
         .await?;
     let file = state
-        .storage
+        .by(&me)
         .finish_upload(id, request.parent, &request.name)
         .await
         .map_err(|err| space_error(err, folder.owner, me.user.id))?;

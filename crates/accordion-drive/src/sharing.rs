@@ -97,7 +97,7 @@ pub(crate) async fn share(
 ) -> Result<Json<ShareView>, ApiError> {
     state.reach(me.user.id, id, Access::Owner).await?;
     let share = state
-        .storage
+        .by(&me)
         .share(id, user, request.level.into(), me.user.id)
         .await?;
     tracing::info!(user = %me.user.id, item = %id, with = %user, level = share.level.as_str(), "shared an item");
@@ -116,7 +116,7 @@ pub(crate) async fn unshare(
     Path((id, user)): Path<(ItemId, UserId)>,
 ) -> Result<StatusCode, ApiError> {
     state.reach(me.user.id, id, Access::Owner).await?;
-    state.storage.unshare(id, user, me.user.id).await?;
+    state.by(&me).unshare(id, user, me.user.id).await?;
     tracing::info!(user = %me.user.id, item = %id, with = %user, "stopped sharing an item");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -129,7 +129,7 @@ pub(crate) async fn unshare_all(
     Path(id): Path<ItemId>,
 ) -> Result<StatusCode, ApiError> {
     state.reach(me.user.id, id, Access::Owner).await?;
-    let removed = state.storage.unshare_all(id, me.user.id).await?;
+    let removed = state.by(&me).unshare_all(id, me.user.id).await?;
     tracing::info!(user = %me.user.id, item = %id, people = removed.len(), "stopped sharing an item with everyone");
     Ok(StatusCode::NO_CONTENT)
 }

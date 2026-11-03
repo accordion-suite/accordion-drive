@@ -286,6 +286,18 @@ fn cases() -> Vec<Case> {
             "/items/{}/shares",
             f.holiday
         )),
+        case!("GET", "/items/{id}/activity", Viewer, |f| format!(
+            "/items/{}/activity",
+            f.photo
+        )),
+        case!("GET", "/notifications", Own, |f| "/notifications".into()),
+        case!(
+            "POST",
+            "/notifications/read",
+            Own,
+            |f| "/notifications/read".into(),
+            Some(json!({ "up_to": 0 }))
+        ),
         case!("GET", "/shared", Own, |f| "/shared".into()),
         case!("GET", "/shared-by-me", Own, |f| "/shared-by-me".into()),
         case!("GET", "/trash", Own, |f| "/trash".into()),

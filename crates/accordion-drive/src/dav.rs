@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use accordion_core::events::{Actor, Via};
 use accordion_core::identity::UsingAppPassword;
 use accordion_core::storage::{self, Access, Item, ItemKind, Storage};
 use accordion_module::{ApiError, DavUser};
@@ -250,12 +251,13 @@ async fn delete(fs: &DriveFs, credentials: &Credentials, address: Address, uri: 
         Ok(_) => return StatusCode::FORBIDDEN.into_response(),
         Err(err) => return status(err).into_response(),
     };
+    let storage = fs.by(credentials);
     if item.kind == ItemKind::Folder
-        && let Err(err) = gather(&fs.storage, &item).await
+        && let Err(err) = gather(&storage, &item).await
     {
         return ApiError::from(err).into_response();
     }
-    match fs.storage.delete(item.id).await {
+    match storage.delete(item.id).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => ApiError::from(err).into_response(),
     }
@@ -339,6 +341,13 @@ struct DriveFs {
 }
 
 impl DriveFs {
+    /// Storage acting as the person making the request, so their changes
+    /// are recorded as theirs.
+    fn by(&self, credentials: &Credentials) -> Storage {
+        self.storage
+            .acting_as(Actor::person(credentials.user, Via::WebDav))
+    }
+
     async fn target(&self, credentials: &Credentials, path: &DavPath) -> FsResult<Target> {
         self.target_of(credentials, names(path)?).await
     }
@@ -458,7 +467,7 @@ impl GuardedFileSystem<Credentials> for DriveFs {
             // lock never writes to it, so create it now.
             if !options.truncate {
                 let item = self
-                    .storage
+                    .by(credentials)
                     .write_file(parent.id, &name, tokio::io::empty())
                     .await
                     .map_err(fs_error)?;
@@ -476,7 +485,7 @@ impl GuardedFileSystem<Credentials> for DriveFs {
                 }) as Box<dyn DavFile>);
             }
             Ok(Box::new(Writing::start(
-                self.storage.clone(),
+                self.by(credentials),
                 parent.id,
                 name,
                 options.size,
@@ -537,7 +546,7 @@ impl GuardedFileSystem<Credentials> for DriveFs {
     ) -> FsFuture<'a, ()> {
         Box::pin(async move {
             let (parent, name) = self.parent_and_name(credentials, path).await?;
-            self.storage
+            self.by(credentials)
                 .create_folder(parent.id, &name)
                 .await
                 .map_err(fs_error)?;
@@ -570,7 +579,7 @@ impl GuardedFileSystem<Credentials> for DriveFs {
         Box::pin(async move {
             let item = self.find(credentials, from, Access::Editor).await?;
             let (parent, name) = self.parent_and_name(credentials, to).await?;
-            self.storage
+            self.by(credentials)
                 .move_item(item.id, parent.id, &name)
                 .await
                 .map_err(fs_error)?;
@@ -596,7 +605,7 @@ impl GuardedFileSystem<Credentials> for DriveFs {
                 .open_contents(blob.hash)
                 .await
                 .map_err(fs_error)?;
-            self.storage
+            self.by(credentials)
                 .write_file(parent.id, &name, contents)
                 .await
                 .map_err(fs_error)?;
@@ -623,7 +632,10 @@ impl DriveFs {
     fn remove<'a>(&'a self, path: &'a DavPath, credentials: &'a Credentials) -> FsFuture<'a, ()> {
         Box::pin(async move {
             let item = self.find(credentials, path, Access::Editor).await?;
-            self.storage.delete(item.id).await.map_err(fs_error)?;
+            self.by(credentials)
+                .delete(item.id)
+                .await
+                .map_err(fs_error)?;
             Ok(())
         })
     }

@@ -7,6 +7,7 @@
 //! people reach them. People see their own files and what others shared
 //! with them, and core decides what each person may do (decision 16).
 
+mod activity;
 mod api;
 mod archive;
 mod colors;
@@ -20,7 +21,8 @@ mod time;
 use std::sync::Arc;
 
 use accordion_core::db::Migration;
-use accordion_core::identity::Identity;
+use accordion_core::events::Events;
+use accordion_core::identity::{Identity, SignedIn};
 use accordion_core::storage::{Access, Item, Storage};
 use accordion_core::thumbnails::Thumbnails;
 use accordion_module::{
@@ -74,6 +76,7 @@ impl Module for Drive {
                 shared_dav: Arc::new(dav::handler(services.storage.clone(), dav::Address::Shared)),
                 storage: services.storage,
                 thumbnails: services.thumbnails,
+                events: services.events,
             };
             Ok(Started {
                 routes: Routes {
@@ -97,6 +100,7 @@ struct DriveState {
     settings: settings::Settings,
     storage: Storage,
     thumbnails: Thumbnails,
+    events: Events,
     dav: Arc<dav_server::DavHandler<dav::Credentials>>,
     /// For `/dav/shared`.
     shared_dav: Arc<dav_server::DavHandler<dav::Credentials>>,
@@ -109,6 +113,12 @@ impl FromRef<DriveState> for Identity {
 }
 
 impl DriveState {
+    /// Storage acting as the signed-in person, so their changes are
+    /// recorded as theirs.
+    fn by(&self, me: &SignedIn) -> Storage {
+        self.storage.acting_as(accordion_module::auth::actor(me))
+    }
+
     /// An item that `user` may use at `needed` or above, with what they may
     /// do. What nobody shared with them is "not found", so nobody learns
     /// what other people have.

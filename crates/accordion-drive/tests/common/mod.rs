@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 use accordion_core::db::Database;
+use accordion_core::events::Events;
 use accordion_core::identity::{AppPasswordUse, AuthMethod, Client, Identity, NewUser};
 use accordion_core::storage::Storage;
 use accordion_core::thumbnails::{Thumbnails, Tools};
@@ -79,6 +80,7 @@ pub async fn start() -> Server {
     )
     .await
     .unwrap();
+    let events = Events::open(db.clone()).await.unwrap();
     let (stop, stopping) = watch::channel(false);
     let started = Drive
         .start(
@@ -87,6 +89,7 @@ pub async fn start() -> Server {
                 identity: identity.clone(),
                 storage: storage.clone(),
                 thumbnails: thumbnails.clone(),
+                events,
             },
             Stopping::new(stopping),
         )
