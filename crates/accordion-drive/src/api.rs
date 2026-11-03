@@ -14,8 +14,9 @@ use std::ops::Range;
 
 use accordion_core::events::{Action, NewEvent};
 use accordion_core::storage::{
-    self, Access, Blob, Found, Item, ItemKind, Only, Search, Upload, Usage, Version,
+    self, Access, Blob, Found, Item, ItemKind, Only, Owner, Place, Search, Upload, Usage, Version,
 };
+use accordion_core::texts::Words;
 use accordion_core::thumbnails::{ThumbnailKind, Thumbnails};
 use accordion_module::auth::actor;
 use accordion_module::{ApiError, Authenticated};
@@ -338,6 +339,15 @@ impl DriveState {
         user: UserId,
         found: Vec<Found>,
     ) -> Result<Json<Vec<FoundView>>, ApiError> {
+        self.found_list(user, found).await.map(Json)
+    }
+
+    /// Views of `found`, leaving out any the user can no longer open.
+    pub(crate) async fn found_list(
+        &self,
+        user: UserId,
+        found: Vec<Found>,
+    ) -> Result<Vec<FoundView>, ApiError> {
         let mut reached = Vec::with_capacity(found.len());
         for found in found {
             let access = match found.item.owner == user {
@@ -359,7 +369,7 @@ impl DriveState {
             .collect();
         self.size_folders(views.iter_mut().map(|view| &mut view.item))
             .await?;
-        Ok(Json(views))
+        Ok(views)
     }
 }
 
@@ -818,18 +828,57 @@ async fn starred(
 
 #[derive(Deserialize)]
 struct SearchQuery {
-    /// Part of the name, ignoring case.
+    /// Words in the name or the text.
     #[serde(default)]
     q: String,
+    /// Words in the name only.
+    #[serde(default)]
+    name: String,
+    /// Words in the text only.
+    #[serde(default)]
+    words: String,
     /// A kind of item: one of the names in [`TYPES`], or "folders".
     #[serde(rename = "type")]
     kind: Option<String>,
+    /// `me`, `others`, or someone's username.
+    owner: Option<String>,
+    /// `my-drive`, `shared`, or a folder's ID, which includes the folders
+    /// inside it.
+    #[serde(rename = "in")]
+    place: Option<String>,
+    /// Only what the user starred.
+    #[serde(default)]
+    starred: bool,
+    /// Only what's in the user's trash.
+    #[serde(default)]
+    trash: bool,
     /// Changed at or after this time, such as `2026-10-30T00:00:00.000Z`.
     /// The web app works out times like the start of today in the reader's
     /// own time zone, which the server doesn't know.
     after: Option<String>,
     /// Changed before this time.
     before: Option<String>,
+    /// Only what the user shared with this username themselves.
+    shared_with: Option<String>,
+}
+
+/// A search result.
+#[derive(Serialize)]
+struct HitView {
+    #[serde(flatten)]
+    found: FoundView,
+    /// How it matched the words: `name` or `text`. Null without words.
+    matched: Option<&'static str>,
+    /// A line of text around where the words matched, in pieces, when they
+    /// matched in the text.
+    snippet: Option<Vec<PieceView>>,
+}
+
+#[derive(Serialize)]
+struct PieceView {
+    text: String,
+    /// Whether this piece is a word that matched.
+    matched: bool,
 }
 
 /// The kinds of file a search can look for, as Google Drive's type filter
@@ -870,47 +919,164 @@ const TYPES: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// `GET /search?q=&type=&after=&before=`: the user's items outside the
-/// trash, and items in what others shared with them, that match, most
-/// recently changed first.
+/// `GET /search`: the user's items outside the trash, and items in what
+/// others shared with them, that match every filter that's set (see
+/// [`SearchQuery`]). Items whose names have the words come first, newest
+/// first, then items whose text has them, best first.
 async fn search(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
     Query(query): Query<SearchQuery>,
-) -> Result<Json<Vec<FoundView>>, ApiError> {
-    let only =
-        match query.kind.as_deref() {
-            None | Some("") => None,
-            Some("folders") => Some(Only::Folders),
-            Some("files") => Some(Only::Files),
-            Some(kind) => {
-                let (_, extensions) = TYPES.iter().find(|(name, _)| *name == kind).ok_or_else(
-                    || {
-                        ApiError::new(
-                            StatusCode::BAD_REQUEST,
-                            format!(
-                                "Accordion doesn't know the type \"{kind}\". Choose another type."
-                            ),
-                        )
-                    },
-                )?;
-                Some(Only::Extensions(
-                    extensions
-                        .iter()
-                        .map(|&extension| extension.to_owned())
-                        .collect(),
-                ))
-            }
-        };
+) -> Result<Json<Vec<HitView>>, ApiError> {
+    let user = me.user.id;
+    let only = match query.kind.as_deref() {
+        None | Some("") => None,
+        Some("folders") => Some(Only::Folders),
+        Some("files") => Some(Only::Files),
+        Some(kind) => {
+            let (_, extensions) =
+                TYPES
+                    .iter()
+                    .find(|(name, _)| *name == kind)
+                    .ok_or_else(|| {
+                        bad_search(format!(
+                            "Accordion doesn't know the type \"{kind}\". Choose another type."
+                        ))
+                    })?;
+            Some(Only::Extensions(
+                extensions
+                    .iter()
+                    .map(|&extension| extension.to_owned())
+                    .collect(),
+            ))
+        }
+    };
+    let owner = match query.owner.as_deref() {
+        None | Some("") => None,
+        Some("me") => Some(Owner::Me),
+        Some("others") => Some(Owner::Others),
+        Some(username) => Some(Owner::Person(state.person(username).await?)),
+    };
+    let place = match query.place.as_deref() {
+        None | Some("") => None,
+        Some("my-drive") => Some(Place::MyDrive),
+        Some("shared") => Some(Place::Shared),
+        Some(folder) => Some(Place::Folder(folder.parse().map_err(|_| {
+            bad_search("Search in My Drive, in what's shared with you, or in a folder.")
+        })?)),
+    };
+    let shared_with = match query.shared_with.as_deref() {
+        None | Some("") => None,
+        Some(username) => Some(state.person(username).await?),
+    };
+    let among = match query.starred {
+        true => Some(state.stars.starred(user).await?.into_iter().collect()),
+        false => None,
+    };
+
+    let either = Words::parse(&query.q);
+    let name = Words::parse(&query.name);
+    let words = Words::parse(&query.words);
+    let text = match words.is_empty() {
+        true => None,
+        false => Some(state.texts.matching(&words).await?),
+    };
+    let name_or_text = match either.is_empty() {
+        true => None,
+        false => Some((either.clone(), state.texts.matching(&either).await?)),
+    };
+    let has_words = !(either.is_empty() && name.is_empty() && words.is_empty());
     let search = Search {
-        text: query.q.trim().to_owned(),
+        name,
+        text,
+        name_or_text,
         only,
+        owner,
+        place,
+        trash: query.trash,
+        shared_with,
+        among,
         modified_since: checked_time(query.after)?,
         modified_before: checked_time(query.before)?,
         limit: SEARCH_LIMIT,
     };
-    let found = state.storage.search(me.user.id, search).await?;
-    state.found_views(me.user.id, found).await
+    let hits = state.storage.search(user, search).await?;
+
+    // Lines of text for what matched in its text. Words only for the text
+    // say more about why it's there.
+    let shown = match words.is_empty() {
+        true => &either,
+        false => &words,
+    };
+    let in_text: Vec<_> = hits
+        .iter()
+        .filter(|hit| hit.text_rank.is_some())
+        .filter_map(|hit| match &hit.found.item.kind {
+            ItemKind::File { blob, .. } => Some(blob.hash),
+            ItemKind::Folder => None,
+        })
+        .collect();
+    let mut snippets = state.texts.snippets(shown, in_text).await?;
+    let mut how: HashMap<ItemId, (Option<&'static str>, Option<Vec<PieceView>>)> = hits
+        .iter()
+        .map(|hit| {
+            let matched = if hit.by_name {
+                Some("name")
+            } else if hit.text_rank.is_some() {
+                Some("text")
+            } else if has_words {
+                Some("name")
+            } else {
+                None
+            };
+            let snippet = match &hit.found.item.kind {
+                ItemKind::File { blob, .. } if hit.text_rank.is_some() => {
+                    snippets.remove(&blob.hash).map(|pieces| {
+                        pieces
+                            .into_iter()
+                            .map(|piece| PieceView {
+                                text: piece.text,
+                                matched: piece.matched,
+                            })
+                            .collect()
+                    })
+                }
+                _ => None,
+            };
+            (hit.found.item.id, (matched, snippet))
+        })
+        .collect();
+    let found = hits.into_iter().map(|hit| hit.found).collect();
+    let views = state.found_list(user, found).await?;
+    Ok(Json(
+        views
+            .into_iter()
+            .map(|found| {
+                let (matched, snippet) = how.remove(&found.item.id).unwrap_or_default();
+                HitView {
+                    found,
+                    matched,
+                    snippet,
+                }
+            })
+            .collect(),
+    ))
+}
+
+fn bad_search(message: impl Into<String>) -> ApiError {
+    ApiError::new(StatusCode::BAD_REQUEST, message)
+}
+
+impl DriveState {
+    /// The ID of the person with `username`, for a search filter.
+    async fn person(&self, username: &str) -> Result<UserId, ApiError> {
+        let user = self.identity.user_by_username(username).await?;
+        user.map(|user| user.id).ok_or_else(|| {
+            bad_search(format!(
+                "Accordion doesn't know anyone with the username \"{username}\"."
+            ))
+        })
+    }
 }
 
 /// Storage compares times as text, so they have to be in its exact format,

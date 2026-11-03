@@ -806,6 +806,145 @@ async fn lists_recent_files_and_searches() {
     assert!(theirs.as_array().unwrap().is_empty());
 }
 
+/// Reads the text of the file with `id` now, for search.
+async fn read_text(server: &common::Server, id: &str) {
+    let item = server
+        .storage
+        .item(id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let accordion_core::storage::ItemKind::File { blob, .. } = item.kind else {
+        panic!("{id} isn't a file");
+    };
+    server.texts.make_now(blob.hash).await.unwrap();
+}
+
+#[tokio::test]
+async fn searches_inside_files_with_every_filter() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let named = write(&server, &top, "Budget.txt", "Groceries and fuel").await;
+    let notes = write(
+        &server,
+        &top,
+        "notes.txt",
+        "Plans for the lake. The budget for fuel is tight.",
+    )
+    .await;
+    let photo = write(&server, &top, "Lake.jpg", "not really a photo").await;
+    for id in [&named, &notes, &photo] {
+        read_text(&server, id).await;
+    }
+    let search = async |query: &str| {
+        let reply = server.api(alex, "GET", query, None).await;
+        assert_eq!(reply.status, StatusCode::OK, "{query}: {}", reply.text());
+        reply.json()
+    };
+
+    // Names first, then text, each saying how it matched.
+    let found = search("/search?q=budget").await;
+    assert_eq!(names(&found), ["Budget.txt", "notes.txt"]);
+    assert_eq!(found[0]["matched"], "name");
+    assert_eq!(found[0]["snippet"], serde_json::Value::Null);
+    assert_eq!(found[1]["matched"], "text");
+    let matched: Vec<&str> = found[1]["snippet"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|piece| piece["matched"] == true)
+        .map(|piece| piece["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(matched, ["budget"]);
+    assert_eq!(names(&search("/search?words=budget").await), ["notes.txt"]);
+    assert_eq!(names(&search("/search?name=budget").await), ["Budget.txt"]);
+    assert_eq!(
+        names(&search("/search?words=fuel&name=notes").await),
+        ["notes.txt"]
+    );
+    // Without words, nothing says how it matched.
+    let found = search("/search?type=photos").await;
+    assert_eq!(names(&found), ["Lake.jpg"]);
+    assert_eq!(found[0]["matched"], serde_json::Value::Null);
+
+    // Each filter.
+    let reply = server
+        .api(alex, "PUT", &format!("/items/{notes}/star"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.text());
+    assert_eq!(
+        names(&search("/search?q=fuel&starred=true").await),
+        ["notes.txt"]
+    );
+    assert_eq!(names(&search("/search?q=lake&owner=me").await).len(), 2);
+    assert!(names(&search("/search?q=lake&owner=others").await).is_empty());
+    assert_eq!(names(&search("/search?q=lake&in=my-drive").await).len(), 2);
+    assert!(names(&search("/search?q=lake&in=shared").await).is_empty());
+    let reply = server
+        .api(
+            alex,
+            "PUT",
+            &format!("/items/{notes}/shares/{}", server.sam.id),
+            Some(json!({ "level": "viewer" })),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(
+        names(&search("/search?shared_with=sam").await),
+        ["notes.txt"]
+    );
+    assert!(names(&search("/search?shared_with=kim").await).is_empty());
+    let sams = server
+        .api(&server.sam, "GET", "/search?q=fuel", None)
+        .await
+        .json();
+    assert_eq!(names(&sams), ["notes.txt"]);
+    let sams = server
+        .api(&server.sam, "GET", "/search?q=fuel&owner=alex", None)
+        .await
+        .json();
+    assert_eq!(names(&sams), ["notes.txt"]);
+    let reply = server
+        .api(alex, "DELETE", &format!("/items/{photo}"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert!(names(&search("/search?q=lake.jpg").await).is_empty());
+    assert_eq!(
+        names(&search("/search?q=lake.jpg&trash=true").await),
+        ["Lake.jpg"]
+    );
+    let folder = server
+        .api(
+            alex,
+            "POST",
+            &format!("/items/{top}/children"),
+            Some(json!({ "name": "Trips" })),
+        )
+        .await
+        .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    write(&server, &folder, "lake%20plan.txt", "x").await;
+    assert_eq!(
+        names(&search(&format!("/search?q=lake&in={folder}")).await),
+        ["Trips/lake plan.txt"]
+    );
+
+    for query in [
+        "/search?owner=nobody",
+        "/search?shared_with=nobody",
+        "/search?in=somewhere",
+    ] {
+        let reply = server.api(alex, "GET", query, None).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{query}");
+    }
+}
+
 #[tokio::test]
 async fn copies_files() {
     let server = start().await;

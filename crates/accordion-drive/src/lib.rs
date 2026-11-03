@@ -24,6 +24,7 @@ use accordion_core::db::Migration;
 use accordion_core::events::Events;
 use accordion_core::identity::{Identity, SignedIn};
 use accordion_core::storage::{Access, Item, Storage};
+use accordion_core::texts::Texts;
 use accordion_core::thumbnails::Thumbnails;
 use accordion_module::{
     ApiError, BoxFuture, Module, Routes, Services, StartError, Started, Stopping,
@@ -77,6 +78,7 @@ impl Module for Drive {
                 shared_dav: Arc::new(dav::handler(services.storage.clone(), dav::Address::Shared)),
                 storage: services.storage,
                 thumbnails: services.thumbnails,
+                texts: services.texts,
                 events: services.events,
             };
             Ok(Started {
@@ -101,6 +103,7 @@ struct DriveState {
     settings: settings::Settings,
     storage: Storage,
     thumbnails: Thumbnails,
+    texts: Texts,
     events: Events,
     dav: Arc<dav_server::DavHandler<dav::Credentials>>,
     /// For `/dav/shared`.

@@ -8,6 +8,7 @@ use accordion_core::events::Events;
 use accordion_core::identity::{AppPasswordUse, AuthMethod, Client, Identity, NewUser};
 use accordion_core::live::Live;
 use accordion_core::storage::Storage;
+use accordion_core::texts::{self, Texts};
 use accordion_core::thumbnails::{Thumbnails, Tools};
 use accordion_drive::Drive;
 use accordion_module::{Module, Services, Stopping};
@@ -27,6 +28,7 @@ pub struct Server {
     pub router: Router,
     pub storage: Storage,
     pub thumbnails: Thumbnails,
+    pub texts: Texts,
     pub alex: Person,
     pub sam: Person,
     /// Two more, for sharing.
@@ -81,6 +83,16 @@ pub async fn start() -> Server {
     )
     .await
     .unwrap();
+    // So is text for search.
+    let texts = Texts::open(
+        db.clone(),
+        storage.clone(),
+        thumbnails.clone(),
+        dir.path(),
+        texts::Tools::installed(env!("CARGO_BIN_EXE_accordion-drive-sandbox")),
+    )
+    .await
+    .unwrap();
     let events = Events::open(db.clone()).await.unwrap();
     let live = Live::new(db.clone(), &identity);
     let (stop, stopping) = watch::channel(false);
@@ -91,6 +103,7 @@ pub async fn start() -> Server {
                 identity: identity.clone(),
                 storage: storage.clone(),
                 thumbnails: thumbnails.clone(),
+                texts: texts.clone(),
                 live,
                 events,
             },
@@ -114,6 +127,7 @@ pub async fn start() -> Server {
         router,
         storage,
         thumbnails,
+        texts,
     }
 }
 
