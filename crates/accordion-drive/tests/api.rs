@@ -871,13 +871,13 @@ async fn copies_files() {
 async fn keeps_each_persons_settings() {
     let server = start().await;
     let (alex, sam) = (&server.alex, &server.sam);
-    let defaults = json!({ "start_page": "home", "thumbnails": true });
+    let defaults = json!({ "start_page": "home", "thumbnails": true, "click": "select" });
     assert_eq!(
         server.api(alex, "GET", "/settings", None).await.json(),
         defaults
     );
 
-    let changed = json!({ "start_page": "my-drive", "thumbnails": false });
+    let changed = json!({ "start_page": "my-drive", "thumbnails": false, "click": "open" });
     let reply = server
         .api(alex, "PUT", "/settings", Some(changed.clone()))
         .await;
@@ -887,13 +887,26 @@ async fn keeps_each_persons_settings() {
         changed
     );
     // Changing them again replaces the row rather than adding one.
-    let again = json!({ "start_page": "home", "thumbnails": false });
+    let again = json!({ "start_page": "home", "thumbnails": false, "click": "download" });
     server
         .api(alex, "PUT", "/settings", Some(again.clone()))
         .await;
     assert_eq!(
         server.api(alex, "GET", "/settings", None).await.json(),
         again
+    );
+    // Apps from before the click setting leave it as it was.
+    server
+        .api(
+            alex,
+            "PUT",
+            "/settings",
+            Some(json!({ "start_page": "home", "thumbnails": true })),
+        )
+        .await;
+    assert_eq!(
+        server.api(alex, "GET", "/settings", None).await.json()["click"],
+        "download"
     );
     // Someone else's are their own.
     assert_eq!(
@@ -904,6 +917,7 @@ async fn keeps_each_persons_settings() {
     for wrong in [
         json!({ "start_page": "trash", "thumbnails": true }),
         json!({ "start_page": "home" }),
+        json!({ "start_page": "home", "thumbnails": true, "click": "delete" }),
     ] {
         let reply = server.api(alex, "PUT", "/settings", Some(wrong)).await;
         assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);

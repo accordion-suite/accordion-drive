@@ -42,6 +42,7 @@ static MIGRATIONS: &[Migration] = &[
     settings::MIGRATION,
     colors::MIGRATION,
     descriptions::MIGRATION,
+    settings::CLICK_MIGRATION,
 ];
 
 /// The Drive module. Add it to the server's list of modules.

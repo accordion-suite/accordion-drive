@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::settings::DriveSettings;
+use crate::settings::{DriveSettings, NewSettings};
 use crate::{DriveState, activity, archive, colors, descriptions, sharing, time};
 
 /// Says where a piece of a resumable upload starts. The name follows the
@@ -560,11 +560,12 @@ async fn get_settings(
     Ok(Json(state.settings.get(me.user.id).await?))
 }
 
-/// `PUT /settings`: replaces them, so send every setting.
+/// `PUT /settings`: replaces them, so send every setting. What a click does
+/// can be left out, and stays as it was.
 async fn put_settings(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
-    Json(settings): Json<DriveSettings>,
+    Json(settings): Json<NewSettings>,
 ) -> Result<StatusCode, ApiError> {
     state.settings.set(me.user.id, settings).await?;
     Ok(StatusCode::NO_CONTENT)
