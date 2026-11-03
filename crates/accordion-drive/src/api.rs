@@ -71,8 +71,13 @@ pub(crate) fn routes(state: DriveState) -> Router {
             put(sharing::share).delete(sharing::unshare),
         )
         .route("/items/{id}/activity", get(activity::activity))
-        .route("/notifications", get(activity::notifications))
+        .route(
+            "/notifications",
+            get(activity::notifications).delete(activity::clear),
+        )
+        .route("/notifications/seen", post(activity::mark_seen))
         .route("/notifications/read", post(activity::mark_read))
+        .route("/notifications/remove", post(activity::remove))
         .route("/shared", get(sharing::shared_with_me))
         .route("/shared-by-me", get(sharing::shared_by_me))
         .route(

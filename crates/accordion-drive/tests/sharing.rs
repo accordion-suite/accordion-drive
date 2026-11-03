@@ -291,12 +291,29 @@ fn cases() -> Vec<Case> {
             f.photo
         )),
         case!("GET", "/notifications", Own, |f| "/notifications".into()),
+        case!("DELETE", "/notifications", Own, |f| {
+            "/notifications?up_to=0".into()
+        }),
+        case!(
+            "POST",
+            "/notifications/seen",
+            Own,
+            |f| "/notifications/seen".into(),
+            Some(json!({ "up_to": 0 }))
+        ),
         case!(
             "POST",
             "/notifications/read",
             Own,
             |f| "/notifications/read".into(),
-            Some(json!({ "up_to": 0 }))
+            Some(json!({ "ids": [] }))
+        ),
+        case!(
+            "POST",
+            "/notifications/remove",
+            Own,
+            |f| "/notifications/remove".into(),
+            Some(json!({ "ids": [] }))
         ),
         case!("GET", "/shared", Own, |f| "/shared".into()),
         case!("GET", "/shared-by-me", Own, |f| "/shared-by-me".into()),

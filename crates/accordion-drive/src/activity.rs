@@ -181,8 +181,9 @@ pub(crate) async fn activity(
 
 #[derive(Serialize)]
 pub(crate) struct NotificationsView {
-    /// How many groups have something unread.
-    unread: usize,
+    /// How many groups have something the person hasn't seen, for the
+    /// count on the bell.
+    new: usize,
     notifications: Vec<NotificationView>,
 }
 
@@ -190,11 +191,16 @@ pub(crate) struct NotificationsView {
 /// added 12 files to Holiday".
 #[derive(Serialize)]
 struct NotificationView {
-    /// The newest event's ID. Marking it read marks the whole group.
+    /// The newest event's ID.
     id: i64,
+    /// Every event in the group, for reading or removing it whole.
+    ids: Vec<i64>,
     at: String,
     action: &'static str,
     actor: Option<PersonView>,
+    /// Whether the person opened the list since it arrived.
+    seen: bool,
+    /// Whether they selected it.
     read: bool,
     /// The first item, with how many there are in all.
     item: Option<ItemRef>,
@@ -219,7 +225,7 @@ pub(crate) async fn notifications(
     let mut views: Vec<NotificationView> = Vec::new();
     // Each group's key: who, what, which folder, and which day.
     let mut last_key = None;
-    for Notice { event, read } in notices {
+    for Notice { event, seen, read } in notices {
         let folder = match event.item {
             Some(item)
                 if event.action != Action::Shared && event.action != Action::ShareChanged =>
@@ -239,6 +245,8 @@ pub(crate) async fn notifications(
             && let Some(group) = views.last_mut()
         {
             group.count += 1;
+            group.ids.push(event.id);
+            group.seen &= seen;
             group.read &= read;
             // The oldest is shown, so the list reads in the order things
             // happened.
@@ -252,9 +260,11 @@ pub(crate) async fn notifications(
         let view = names.event(event).await?;
         views.push(NotificationView {
             id: view.id,
+            ids: vec![view.id],
             at: view.at,
             action: view.action,
             actor: view.actor,
+            seen,
             read,
             item: view.item,
             count: 1,
@@ -263,24 +273,85 @@ pub(crate) async fn notifications(
         });
     }
     Ok(Json(NotificationsView {
-        unread: views.iter().filter(|view| !view.read).count(),
+        new: views.iter().filter(|view| !view.seen).count(),
         notifications: views,
     }))
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ReadRequest {
-    /// Marks this notification and everything before it read.
+pub(crate) struct UpTo {
+    /// The newest notification the person was shown.
     up_to: i64,
 }
 
-/// `POST /notifications/read`: marks notifications read, up to one the
-/// person has seen.
+#[derive(Deserialize)]
+pub(crate) struct Ids {
+    /// The events of one or more notifications, as `ids` lists them.
+    ids: Vec<i64>,
+}
+
+/// The most events one request can name, more than the list ever shows.
+const MAX_IDS: usize = 1_000;
+
+fn check_ids(ids: &Ids) -> Result<(), ApiError> {
+    if ids.ids.len() > MAX_IDS {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "That's too many notifications at once. Try again with fewer.",
+        ));
+    }
+    Ok(())
+}
+
+/// `POST /notifications/seen`: marks notifications seen, up to the newest
+/// the person was shown, which clears the count on the bell. They stay
+/// highlighted until they're read.
+pub(crate) async fn mark_seen(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Json(request): Json<UpTo>,
+) -> Result<StatusCode, ApiError> {
+    state.events.mark_seen(me.user.id, request.up_to).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /notifications/read`: marks notifications read, such as one the
+/// person selected.
 pub(crate) async fn mark_read(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
-    Json(request): Json<ReadRequest>,
+    Json(request): Json<Ids>,
 ) -> Result<StatusCode, ApiError> {
-    state.events.mark_read(me.user.id, request.up_to).await?;
+    check_ids(&request)?;
+    state.events.mark_read(me.user.id, request.ids).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /notifications/remove`: removes notifications for the signed-in
+/// person only.
+pub(crate) async fn remove(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Json(request): Json<Ids>,
+) -> Result<StatusCode, ApiError> {
+    check_ids(&request)?;
+    state
+        .events
+        .remove_notifications(me.user.id, request.ids)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /notifications?up_to={id}`: removes every notification up to
+/// the newest the person was shown, so one that arrives meanwhile stays.
+pub(crate) async fn clear(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Query(query): Query<UpTo>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .events
+        .clear_notifications(me.user.id, query.up_to)
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }

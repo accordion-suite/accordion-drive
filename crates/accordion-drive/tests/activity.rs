@@ -165,7 +165,7 @@ async fn notifications_group_changes_and_mark_read() {
         .await);
 
     let sams = ok(server.api(sam, "GET", "/notifications", None).await);
-    assert_eq!(sams["unread"], 1);
+    assert_eq!(sams["new"], 1);
     let shared = &sams["notifications"][0];
     assert_eq!(shared["action"], "shared");
     assert_eq!(shared["actor"]["name"], "alex");
@@ -176,22 +176,62 @@ async fn notifications_group_changes_and_mark_read() {
         put_file(&server, sam, &holiday, name).await;
     }
     let alexs = ok(server.api(alex, "GET", "/notifications", None).await);
-    assert_eq!(alexs["unread"], 1);
+    assert_eq!(alexs["new"], 1);
     let added = &alexs["notifications"][0];
     assert_eq!(added["action"], "added");
     assert_eq!(added["count"], 3);
+    assert_eq!(added["ids"].as_array().unwrap().len(), 3);
     assert_eq!(added["item"]["name"], "one.jpg");
     assert_eq!(added["folder"]["name"], "Holiday");
 
+    // Opening the list clears the count, and the group stays highlighted
+    // until it's selected.
+    ok(server
+        .api(
+            alex,
+            "POST",
+            "/notifications/seen",
+            Some(json!({ "up_to": added["id"] })),
+        )
+        .await);
+    let alexs = ok(server.api(alex, "GET", "/notifications", None).await);
+    assert_eq!(alexs["new"], 0);
+    assert_eq!(alexs["notifications"][0]["seen"], true);
+    assert_eq!(alexs["notifications"][0]["read"], false);
+    let ids = alexs["notifications"][0]["ids"].clone();
     ok(server
         .api(
             alex,
             "POST",
             "/notifications/read",
-            Some(json!({ "up_to": added["id"] })),
+            Some(json!({ "ids": ids })),
         )
         .await);
     let alexs = ok(server.api(alex, "GET", "/notifications", None).await);
-    assert_eq!(alexs["unread"], 0);
     assert_eq!(alexs["notifications"][0]["read"], true);
+
+    // Removing takes the whole group away, for Alex only.
+    ok(server
+        .api(
+            alex,
+            "POST",
+            "/notifications/remove",
+            Some(json!({ "ids": ids })),
+        )
+        .await);
+    let alexs = ok(server.api(alex, "GET", "/notifications", None).await);
+    assert_eq!(alexs["notifications"], json!([]));
+
+    // Clearing all keeps nothing up to what was shown.
+    let newest = sams["notifications"][0]["id"].clone();
+    ok(server
+        .api(
+            sam,
+            "DELETE",
+            &format!("/notifications?up_to={newest}"),
+            None,
+        )
+        .await);
+    let sams = ok(server.api(sam, "GET", "/notifications", None).await);
+    assert_eq!(sams["notifications"], json!([]));
 }
