@@ -11,12 +11,14 @@
 use accordion_core::db::rusqlite::{self, OptionalExtension, Row};
 use accordion_core::db::{Database, Migration};
 use accordion_core::events::{Action, NewEvent};
-use accordion_core::identity::password;
+use accordion_core::identity::{SignedIn, password};
 use accordion_core::sql_now;
 use accordion_core::storage::{Access, Error};
 use accordion_module::auth::actor;
 use accordion_module::{ApiError, Authenticated};
 use accordion_types::{ItemId, LinkId, Role, UserId};
+use std::collections::HashSet;
+
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -65,6 +67,18 @@ macro_rules! link_columns {
     () => {
         "id, item_id, made_by, password_hash IS NOT NULL, note, created_at, expires_at, \
          download_limit, downloads, opens, last_opened_at"
+    };
+}
+
+/// The condition for a link that still works: not expired, and with
+/// downloads left.
+macro_rules! working {
+    () => {
+        concat!(
+            "(expires_at IS NULL OR expires_at > ",
+            sql_now!(),
+            ") AND (download_limit IS NULL OR downloads < download_limit)"
+        )
     };
 }
 
@@ -191,6 +205,28 @@ impl Links {
         self.list("", None).await
     }
 
+    /// Every link that still works, newest first.
+    pub async fn working(&self) -> Result<Vec<Link>, Error> {
+        self.list(concat!("WHERE ", working!()), None).await
+    }
+
+    /// The items with a link that still works, such as for the mark that
+    /// says an item is shared.
+    pub async fn linked_items(&self) -> Result<HashSet<ItemId>, Error> {
+        self.db
+            .read(|conn| {
+                let items = conn
+                    .prepare(concat!(
+                        "SELECT DISTINCT item_id FROM drive_links WHERE ",
+                        working!()
+                    ))?
+                    .query_map([], |row| Ok(ItemId::from_uuid(row.get(0)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok::<_, Error>(items)
+            })
+            .await
+    }
+
     async fn list(
         &self,
         condition: &'static str,
@@ -251,12 +287,8 @@ impl Links {
                     concat!(
                         "SELECT ",
                         link_columns!(),
-                        ", password_hash FROM drive_links
-                         WHERE token_hash = ?1
-                           AND (expires_at IS NULL OR expires_at > ",
-                        sql_now!(),
-                        ")
-                           AND (download_limit IS NULL OR downloads < download_limit)"
+                        ", password_hash FROM drive_links WHERE token_hash = ?1 AND ",
+                        working!()
                     ),
                     [hash],
                     |row| {
@@ -268,6 +300,19 @@ impl Links {
                 )
                 .optional()
                 .map_err(Error::from)
+            })
+            .await
+    }
+
+    /// Removes every link to `item`, and returns which it removed.
+    pub async fn remove_for_item(&self, item: ItemId) -> Result<Vec<LinkId>, Error> {
+        self.db
+            .write(move |tx| {
+                let removed = tx
+                    .prepare("DELETE FROM drive_links WHERE item_id = ?1 RETURNING id")?
+                    .query_map([item.as_uuid()], |row| Ok(LinkId::from_uuid(row.get(0)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok::<_, Error>(removed)
             })
             .await
     }
@@ -358,6 +403,9 @@ pub(crate) struct LinkView {
     link: Link,
     /// The name of who made it.
     made_by_name: String,
+    /// Whether the signed-in user may remove it: its maker, the item's
+    /// owner, and admins may.
+    removable: bool,
 }
 
 #[derive(Serialize)]
@@ -369,13 +417,17 @@ pub(crate) struct AdminLinkView {
 }
 
 impl DriveState {
-    async fn link_view(&self, link: Link) -> Result<LinkView, ApiError> {
+    async fn link_view(&self, link: Link, removable: bool) -> Result<LinkView, ApiError> {
         let made_by_name = self
             .identity
             .user(link.made_by)
             .await?
             .map_or_else(String::new, |user| user.display_name);
-        Ok(LinkView { link, made_by_name })
+        Ok(LinkView {
+            link,
+            made_by_name,
+            removable,
+        })
     }
 
     /// The link origin, or why links can't be made now.
@@ -396,10 +448,12 @@ pub(crate) async fn item_links(
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
 ) -> Result<Json<Vec<LinkView>>, ApiError> {
-    state.reach(me.user.id, id, Access::Editor).await?;
+    let (_, access) = state.reach(me.user.id, id, Access::Editor).await?;
+    let anyones = access == Access::Owner || is_admin(&me);
     let mut views = Vec::new();
     for link in state.links.for_item(id).await? {
-        views.push(state.link_view(link).await?);
+        let removable = anyones || link.made_by == me.user.id;
+        views.push(state.link_view(link, removable).await?);
     }
     Ok(Json(views))
 }
@@ -474,7 +528,7 @@ pub(crate) async fn make_link(
     Ok((
         StatusCode::CREATED,
         Json(MadeLink {
-            link: state.link_view(link).await?,
+            link: state.link_view(link, true).await?,
             url: format!("{origin}/s/{token}"),
         }),
     ))
@@ -488,9 +542,8 @@ pub(crate) async fn remove_link(
     Path(id): Path<LinkId>,
 ) -> Result<StatusCode, ApiError> {
     let link = state.links.get(id).await?.ok_or_else(ApiError::not_found)?;
-    let admin = matches!(me.user.role, Role::Owner | Role::Admin);
     let owner = state.storage.access(me.user.id, link.item).await? == Some(Access::Owner);
-    if link.made_by != me.user.id && !owner && !admin {
+    if link.made_by != me.user.id && !owner && !is_admin(&me) {
         return Err(ApiError::not_found());
     }
     state.links.remove(id).await?;
@@ -510,7 +563,7 @@ pub(crate) async fn all_links(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
 ) -> Result<Json<Vec<AdminLinkView>>, ApiError> {
-    if !matches!(me.user.role, Role::Owner | Role::Admin) {
+    if !is_admin(&me) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "Only admins can see everyone's links.",
@@ -528,12 +581,16 @@ pub(crate) async fn all_links(
             .await?
             .map_or_else(String::new, |user| user.display_name);
         views.push(AdminLinkView {
-            link: state.link_view(link).await?,
+            link: state.link_view(link, true).await?,
             item_name: item.name,
             owner_name,
         });
     }
     Ok(Json(views))
+}
+
+pub(crate) fn is_admin(me: &SignedIn) -> bool {
+    matches!(me.user.role, Role::Owner | Role::Admin)
 }
 
 #[cfg(test)]

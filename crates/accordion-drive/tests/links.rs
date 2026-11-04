@@ -345,3 +345,112 @@ async fn only_owners_and_editors_make_links_and_removing_one_ends_it() {
     let all = server.api(alex, "GET", "/links", None).await;
     assert_eq!(all.status, StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn editors_see_links_and_shared_by_me_lists_linked_items() {
+    let server = start().await;
+    let (alex, kim) = (&server.alex, &server.kim);
+    let top = id(server.api(alex, "GET", "/top", None).await);
+    let school = folder(&server, alex, &top, "School").await;
+    let taxes = file(&server, alex, &top, "taxes.pdf", "%PDF").await;
+    let lease = file(&server, alex, &top, "lease.txt", "one year").await;
+    let reply = server
+        .api(
+            alex,
+            "PUT",
+            &format!("/items/{school}/shares/{}", kim.id),
+            Some(json!({ "level": "editor" })),
+        )
+        .await;
+    assert!(reply.status.is_success());
+
+    // An editor sees every link to the item, and may remove only their own.
+    let kims_path = link(&server, kim, &school, json!({ "expires": "7d" })).await;
+    let alexs_path = link(&server, alex, &school, json!({ "expires": "7d" })).await;
+    let seen = server
+        .api(kim, "GET", &format!("/items/{school}/links"), None)
+        .await
+        .json();
+    let removable: Vec<(&str, bool)> = seen
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|link| {
+            (
+                link["made_by_name"].as_str().unwrap(),
+                link["removable"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(removable, [("alex", false), ("kim", true)]);
+    let owners = server
+        .api(alex, "GET", &format!("/items/{school}/links"), None)
+        .await
+        .json();
+    assert!(
+        owners
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|link| link["removable"] == true)
+    );
+
+    // A link with no downloads left isn't sharing anything.
+    link(&server, alex, &taxes, json!({ "expires": "30d" })).await;
+    let used = link(
+        &server,
+        alex,
+        &lease,
+        json!({ "expires": "30d", "download_limit": 1 }),
+    )
+    .await;
+    let download = server
+        .link("GET", &format!("{used}/download/{lease}"), &[], "")
+        .await;
+    assert_eq!(download.status, StatusCode::OK);
+
+    let out = server.api(alex, "GET", "/shared-by-me", None).await.json();
+    let listed: Vec<(&str, usize, u64)> = out
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| {
+            (
+                item["name"].as_str().unwrap(),
+                item["shared_with"].as_array().unwrap().len(),
+                item["links"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert!(listed.contains(&("School", 1, 2)), "{listed:?}");
+    assert!(listed.contains(&("taxes.pdf", 0, 1)), "{listed:?}");
+    // Kim made a link, but to Alex's folder, so it's not Kim's to list.
+    let kims = server.api(kim, "GET", "/shared-by-me", None).await.json();
+    assert_eq!(kims.as_array().unwrap().len(), 0, "{kims}");
+
+    // The owner's list marks a linked item as shared.
+    let children = server
+        .api(alex, "GET", &format!("/items/{top}/children"), None)
+        .await
+        .json();
+    let shared: Vec<(&str, bool)> = children
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| (item["name"].as_str().unwrap(), item["shared"] == true))
+        .collect();
+    assert!(shared.contains(&("taxes.pdf", true)), "{shared:?}");
+    assert!(shared.contains(&("lease.txt", false)), "{shared:?}");
+
+    // Stop sharing ends the people's access and every link, whoever made it.
+    let reply = server
+        .api(alex, "DELETE", &format!("/items/{school}/shares"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    doesnt_work(&server.link("GET", &kims_path, &[], "").await);
+    doesnt_work(&server.link("GET", &alexs_path, &[], "").await);
+    let out = server.api(alex, "GET", "/shared-by-me", None).await.json();
+    assert_eq!(out.as_array().unwrap().len(), 1, "{out}");
+    assert_eq!(out[0]["name"], "taxes.pdf");
+}

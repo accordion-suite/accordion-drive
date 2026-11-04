@@ -2,9 +2,14 @@
 //! someone or changing their access, **Shared with me**, and **Shared by
 //! me**. Core keeps the
 //! shares and decides what each person may do (decision 16). Only the owner
-//! shares, at first.
+//! shares with people. Links are in [`crate::links`], and **Shared by me**
+//! lists linked items too.
 
-use accordion_core::storage::{Access, Share, ShareLevel};
+use std::collections::{HashMap, HashSet};
+
+use accordion_core::events::{Action, NewEvent};
+use accordion_core::storage::{Access, Found, Share, ShareLevel};
+use accordion_module::auth::actor;
 use accordion_module::{ApiError, Authenticated};
 use accordion_types::{ItemId, UserId};
 use axum::Json;
@@ -122,60 +127,111 @@ pub(crate) async fn unshare(
 }
 
 /// `DELETE /items/{id}/shares`: stops sharing an item with everyone it's
-/// shared with directly. Shares on folders above it stay.
+/// shared with directly, and removes its links, whoever made them. Shares
+/// and links on folders above it stay.
 pub(crate) async fn unshare_all(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
 ) -> Result<StatusCode, ApiError> {
-    state.reach(me.user.id, id, Access::Owner).await?;
+    let (item, _) = state.reach(me.user.id, id, Access::Owner).await?;
     let removed = state.by(&me).unshare_all(id, me.user.id).await?;
-    tracing::info!(user = %me.user.id, item = %id, people = removed.len(), "stopped sharing an item with everyone");
+    let links = state.links.remove_for_item(id).await?;
+    for link in &links {
+        let event = NewEvent::about(Action::LinkRemoved, id, item.owner)
+            .details(serde_json::json!({ "link": link }));
+        if let Err(err) = state.events.record(actor(&me), event).await {
+            tracing::warn!(%err, "couldn't record a removed link in the event log");
+        }
+    }
+    tracing::info!(
+        user = %me.user.id,
+        item = %id,
+        people = removed.len(),
+        links = links.len(),
+        "stopped sharing an item with everyone"
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Something the signed-in user shared, and who with.
+/// Something the signed-in user shared, who with, and how many links it
+/// has.
 #[derive(Serialize)]
 pub(crate) struct SharedOutView {
     #[serde(flatten)]
     found: FoundView,
     shared_with: Vec<ShareView>,
-    /// When it was last shared with someone new.
+    /// How many of its links still work, whoever made them.
+    links: usize,
+    /// When it was last shared with someone new, or got a new link.
     shared_at: String,
 }
 
-/// `GET /shared-by-me`: what the signed-in user shared directly, outside
-/// the trash, most recently shared first, as Proton Drive's **Shared**
-/// lists it.
+/// `GET /shared-by-me`: what the signed-in user shared directly with
+/// people or by a link that works, outside the trash, most recently shared
+/// first, as Proton Drive's **Shared** lists it.
 pub(crate) async fn shared_by_me(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
 ) -> Result<Json<Vec<SharedOutView>>, ApiError> {
+    // Each linked item's working links, and when the newest was made. The
+    // list is newest first.
+    let mut links: HashMap<ItemId, (usize, String)> = HashMap::new();
+    for link in state.links.working().await? {
+        links.entry(link.item).or_insert((0, link.created_at)).0 += 1;
+    }
     let shared = state.storage.shared_by(me.user.id).await?;
-    let mut people = Vec::with_capacity(shared.len());
-    let mut found = Vec::with_capacity(shared.len());
-    for out in shared {
-        let shared_at = out
-            .shares
+    let with_people: HashSet<ItemId> = shared.iter().map(|out| out.found.item.id).collect();
+    let linked_only: Vec<ItemId> = links
+        .keys()
+        .filter(|id| !with_people.contains(id))
+        .copied()
+        .collect();
+    let mut out: Vec<(Found, Vec<Share>)> = shared
+        .into_iter()
+        .map(|out| (out.found, out.shares))
+        .collect();
+    out.extend(
+        state
+            .storage
+            .found_items(me.user.id, linked_only)
+            .await?
+            .into_iter()
+            .map(|found| (found, Vec::new())),
+    );
+
+    let mut listed = Vec::with_capacity(out.len());
+    for (item, shares) in out {
+        let (link_count, linked_at) = links.remove(&item.item.id).unwrap_or_default();
+        let shared_at = shares
             .iter()
             .map(|share| share.created_at.clone())
+            .chain((link_count > 0).then_some(linked_at))
             .max()
             .unwrap_or_default();
-        let mut with = Vec::with_capacity(out.shares.len());
-        for share in out.shares {
+        let mut with = Vec::with_capacity(shares.len());
+        for share in shares {
             with.extend(state.share_view(share).await?);
         }
-        people.push((with, shared_at));
-        found.push(out.found);
+        listed.push((item, with, link_count, shared_at));
     }
+    listed.sort_by(|a, b| {
+        b.3.cmp(&a.3)
+            .then_with(|| a.0.item.name.cmp(&b.0.item.name))
+    });
+    let (found, details): (Vec<Found>, Vec<_>) = listed
+        .into_iter()
+        .map(|(found, with, links, shared_at)| (found, (with, links, shared_at)))
+        .unzip();
     let Json(views) = state.found_views(me.user.id, found).await?;
     // The user owns every item, so none are dropped and the order holds.
     let views = views
         .into_iter()
-        .zip(people)
-        .map(|(found, (shared_with, shared_at))| SharedOutView {
+        .zip(details)
+        .map(|(found, (shared_with, links, shared_at))| SharedOutView {
             found,
             shared_with,
+            links,
             shared_at,
         })
         .collect();

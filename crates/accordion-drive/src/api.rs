@@ -145,7 +145,8 @@ pub(crate) struct ItemView {
     access: &'static str,
     /// The owner's name, when it's someone else's.
     owner: Option<String>,
-    /// For the owner: whether they shared it with anyone.
+    /// For the owner: whether they shared it with anyone, or it has a link
+    /// that works.
     shared: bool,
     /// For a folder: the color the signed-in user picked for it, if any.
     color: Option<String>,
@@ -155,7 +156,8 @@ pub(crate) struct ItemView {
 pub(crate) struct Reader {
     user: UserId,
     stars: HashSet<ItemId>,
-    /// Their own items that they shared with someone.
+    /// Items that are shared with someone or have a link that works. Only
+    /// the user's own are marked.
     shared: HashSet<ItemId>,
     /// The names of the people who own the other items being shown.
     names: HashMap<UserId, String>,
@@ -265,6 +267,7 @@ impl DriveState {
                 .shared_by_owner(user)
                 .await?
                 .into_iter()
+                .chain(self.links.linked_items().await?)
                 .collect(),
             names,
             colors: self.colors.all(user).await?,
