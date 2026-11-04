@@ -31,6 +31,8 @@ struct Fixture {
     upload: String,
     kim: String,
     lee: String,
+    /// A link Alex made to the holiday folder.
+    link: String,
 }
 
 fn id(reply: Reply) -> String {
@@ -109,7 +111,20 @@ async fn files(server: &Server, n: usize) -> Fixture {
             StatusCode::OK
         );
     }
+    let link = server
+        .api(
+            alex,
+            "POST",
+            &format!("/items/{holiday}/links"),
+            Some(json!({ "expires": "1d" })),
+        )
+        .await
+        .json()["link"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     Fixture {
+        link,
         kim: server.kim.id.to_string(),
         lee: server.lee.id.to_string(),
         top,
@@ -134,6 +149,8 @@ enum Needs {
     /// Everyone, each with their own: their settings, their trash, and so
     /// on.
     Own,
+    /// Admins, which nobody here is.
+    Admin,
 }
 
 struct Case {
@@ -286,6 +303,22 @@ fn cases() -> Vec<Case> {
             "/items/{}/shares",
             f.holiday
         )),
+        case!("GET", "/items/{id}/links", Editor, |f| format!(
+            "/items/{}/links",
+            f.holiday
+        )),
+        case!(
+            "POST",
+            "/items/{id}/links",
+            Editor,
+            |f| format!("/items/{}/links", f.holiday),
+            Some(json!({ "expires": "1d" }))
+        ),
+        case!("GET", "/links", Admin, |f| "/links".into()),
+        case!("DELETE", "/links/{id}", OwnerAlone, |f| format!(
+            "/links/{}",
+            f.link
+        )),
         case!("GET", "/items/{id}/activity", Viewer, |f| format!(
             "/items/{}/activity",
             f.photo
@@ -433,6 +466,10 @@ async fn every_address_checks_access() {
             } else {
                 server.api(person, case.method, &path, body.clone()).await
             };
+            if case.needs == Needs::Admin {
+                assert_eq!(reply.status, StatusCode::FORBIDDEN, "{label} as {name}");
+                continue;
+            }
             let allowed = match (case.needs, has) {
                 (Needs::Own, _) => true,
                 (_, None) => false,

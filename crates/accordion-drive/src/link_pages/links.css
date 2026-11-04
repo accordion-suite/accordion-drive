@@ -1,0 +1,255 @@
+/* The link pages' look: plain, readable on a phone, and in the reader's own
+   light or dark theme. */
+
+:root {
+  color-scheme: light dark;
+  --text: #1b1f24;
+  --hint: #5a6270;
+  --line: #d9dee5;
+  --surface: #ffffff;
+  --page: #f3f5f8;
+  --accent: #1a5fb4;
+  --accent-text: #ffffff;
+  --error: #b3261e;
+  --kind-folder: #5f6b7a;
+  --kind-documents: #2f6fd6;
+  --kind-spreadsheets: #1e8e4e;
+  --kind-presentations: #d98a00;
+  --kind-pdfs: #d33b2c;
+  --kind-photos: #c2410c;
+  --kind-videos: #b5179e;
+  --kind-audio: #7048c8;
+  --kind-archives: #6b5a45;
+  --kind-file: #6b7685;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #e6e9ee;
+    --hint: #a3abb8;
+    --line: #2f3540;
+    --surface: #1b1f26;
+    --page: #121519;
+    --accent: #8ab4f8;
+    --accent-text: #0d1b2e;
+    --error: #f2b8b5;
+    --kind-folder: #aab4c2;
+    --kind-documents: #7aa8f0;
+    --kind-spreadsheets: #5cc98a;
+    --kind-presentations: #f2bb4d;
+    --kind-pdfs: #f07b6e;
+    --kind-photos: #f59a62;
+    --kind-videos: #e57ad2;
+    --kind-audio: #a98bf0;
+    --kind-archives: #c4ad8e;
+    --kind-file: #a4adba;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text);
+  font: 16px/1.5 system-ui, sans-serif;
+}
+
+main {
+  max-width: 760px;
+  margin: 24px auto;
+  padding: 24px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+@media (max-width: 800px) {
+  main {
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+  }
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 24px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.from,
+.facts,
+.path,
+footer {
+  color: var(--hint);
+}
+
+.from {
+  margin: 0 0 16px;
+}
+
+.path {
+  margin: 0 0 4px;
+  overflow-wrap: anywhere;
+}
+
+a {
+  color: var(--accent);
+}
+
+.button,
+button {
+  display: inline-block;
+  padding: 10px 20px;
+  border: 0;
+  border-radius: 20px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.preview {
+  display: block;
+  max-width: 100%;
+  max-height: 70vh;
+  margin: 16px 0;
+  border-radius: 8px;
+}
+
+audio {
+  width: 100%;
+  margin: 16px 0;
+}
+
+.items {
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.items li {
+  border-top: 1px solid var(--line);
+}
+
+.items a {
+  display: grid;
+  grid-template-columns: 48px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.items .name {
+  overflow-wrap: anywhere;
+}
+
+.items .detail {
+  color: var(--hint);
+  white-space: nowrap;
+}
+
+.thumbnail {
+  display: block;
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: var(--page);
+}
+
+/* The web app's file icons and colors, for items without a picture. */
+.icon {
+  display: block;
+}
+
+.icon.small {
+  width: 32px;
+  height: 32px;
+  justify-self: center;
+}
+
+.icon.large {
+  width: 96px;
+  height: 96px;
+  margin: 16px 0;
+}
+
+.kind-folder {
+  color: var(--kind-folder);
+}
+
+.kind-documents {
+  color: var(--kind-documents);
+}
+
+.kind-spreadsheets {
+  color: var(--kind-spreadsheets);
+}
+
+.kind-presentations {
+  color: var(--kind-presentations);
+}
+
+.kind-pdfs {
+  color: var(--kind-pdfs);
+}
+
+.kind-photos {
+  color: var(--kind-photos);
+}
+
+.kind-videos {
+  color: var(--kind-videos);
+}
+
+.kind-audio {
+  color: var(--kind-audio);
+}
+
+.kind-archives {
+  color: var(--kind-archives);
+}
+
+.kind-file {
+  color: var(--kind-file);
+}
+
+label {
+  display: block;
+  margin: 16px 0 6px;
+  font-weight: 600;
+}
+
+input {
+  display: block;
+  width: 100%;
+  max-width: 360px;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--page);
+  color: inherit;
+  font: inherit;
+}
+
+.error {
+  color: var(--error);
+}
+
+footer {
+  margin: 16px auto 24px;
+  max-width: 760px;
+  padding: 0 16px;
+  font-size: 14px;
+  text-align: center;
+}

@@ -37,7 +37,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::settings::{DriveSettings, NewSettings};
-use crate::{DriveState, activity, archive, colors, descriptions, sharing, time};
+use crate::{DriveState, activity, archive, colors, descriptions, links, sharing, time};
 
 /// Says where a piece of a resumable upload starts. The name follows the
 /// tus protocol, which uses the same header for the same purpose.
@@ -79,6 +79,12 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/notifications/seen", post(activity::mark_seen))
         .route("/notifications/read", post(activity::mark_read))
         .route("/notifications/remove", post(activity::remove))
+        .route(
+            "/items/{id}/links",
+            get(links::item_links).post(links::make_link),
+        )
+        .route("/links", get(links::all_links))
+        .route("/links/{id}", delete(links::remove_link))
         .route("/shared", get(sharing::shared_with_me))
         .route("/shared-by-me", get(sharing::shared_by_me))
         .route(
@@ -883,7 +889,7 @@ struct PieceView {
 
 /// The kinds of file a search can look for, as Google Drive's type filter
 /// offers, by the extensions their names end in.
-const TYPES: &[(&str, &[&str])] = &[
+pub(crate) const TYPES: &[(&str, &[&str])] = &[
     (
         "documents",
         &["doc", "docx", "odt", "rtf", "txt", "md", "pages"],
@@ -918,6 +924,20 @@ const TYPES: &[(&str, &[&str])] = &[
         &["zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz"],
     ),
 ];
+
+/// Which of [`TYPES`] a file is, by its name's extension. A name that only
+/// starts with a dot, such as `.bashrc`, has no extension.
+pub(crate) fn file_type(name: &str) -> Option<&'static str> {
+    let (stem, extension) = name.rsplit_once('.')?;
+    if stem.is_empty() {
+        return None;
+    }
+    let extension = extension.to_lowercase();
+    TYPES
+        .iter()
+        .find(|(_, extensions)| extensions.contains(&extension.as_str()))
+        .map(|(kind, _)| *kind)
+}
 
 /// `GET /search`: the user's items outside the trash, and items in what
 /// others shared with them, that match every filter that's set (see
@@ -1115,6 +1135,16 @@ async fn preview_file(
     request: HeaderMap,
 ) -> Result<Response, ApiError> {
     let (item, _) = state.reach(me.user.id, id, Access::Viewer).await?;
+    preview_response(&state, &request, &item).await
+}
+
+/// A file's preview, for the web app and for link pages: the file as a
+/// type the browser shows itself, or an Office document's PDF preview.
+pub(crate) async fn preview_response(
+    state: &DriveState,
+    request: &HeaderMap,
+    item: &Item,
+) -> Result<Response, ApiError> {
     let ItemKind::File { blob, .. } = item.kind else {
         return Err(storage::Error::NotAFile.into());
     };
@@ -1150,7 +1180,7 @@ async fn preview_file(
             // of it, since a newer LibreOffice may make another.
             let etag = format!("\"{}-{size}\"", blob.hash);
             return send(
-                &request,
+                request,
                 file,
                 size,
                 &etag,
@@ -1162,7 +1192,7 @@ async fn preview_file(
         }
     };
     let disposition = disposition("inline", &item.name);
-    send_file(&state, &request, blob, content_type, disposition, policy).await
+    send_file(state, request, blob, content_type, disposition, policy).await
 }
 
 /// `GET /items/{id}/preview/{name}`: the same, at an address that ends in
@@ -1481,7 +1511,7 @@ fn reader(body: Body) -> impl AsyncRead + Unpin + Send {
 }
 
 /// A kind of file the browser can show itself.
-enum Preview {
+pub(crate) enum Preview {
     /// With its type, such as "image/png".
     Image(&'static str),
     Pdf,
@@ -1511,7 +1541,7 @@ fn text_kind(name: &str) -> bool {
 /// rather than running as something else. SVG images are left out because
 /// they can hold scripts, and HEIC photos because most browsers can't
 /// show them.
-fn preview(name: &str) -> Option<Preview> {
+pub(crate) fn preview(name: &str) -> Option<Preview> {
     let (_, extension) = name.rsplit_once('.')?;
     let image = match extension.to_ascii_lowercase().as_str() {
         "jpg" | "jpeg" => "image/jpeg",
@@ -1544,7 +1574,7 @@ fn preview(name: &str) -> Option<Preview> {
 /// Accordion's own pages: a crafted HTML file could otherwise run scripts
 /// with the user's session. The headers make the browser save the file,
 /// stop it guessing the type, and sandbox it if it's shown anyway.
-async fn file_response(
+pub(crate) async fn file_response(
     state: &DriveState,
     request: &HeaderMap,
     name: &str,
@@ -1699,7 +1729,7 @@ fn requested_range(
 /// A `Content-Disposition` header, "attachment" or "inline", that names the
 /// file. `filename*` carries the exact name in any script (RFC 6266), and
 /// `filename` is a plain ASCII stand-in for clients that don't read it.
-fn disposition(kind: &str, name: &str) -> HeaderValue {
+pub(crate) fn disposition(kind: &str, name: &str) -> HeaderValue {
     let plain: String = name
         .chars()
         .map(|c| {

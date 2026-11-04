@@ -13,6 +13,8 @@ mod archive;
 mod colors;
 mod dav;
 mod descriptions;
+mod link_pages;
+mod links;
 mod settings;
 mod sharing;
 mod stars;
@@ -44,6 +46,7 @@ static MIGRATIONS: &[Migration] = &[
     colors::MIGRATION,
     descriptions::MIGRATION,
     settings::CLICK_MIGRATION,
+    links::MIGRATION,
 ];
 
 /// The Drive module. Add it to the server's list of modules.
@@ -69,6 +72,8 @@ impl Module for Drive {
                 stars: stars::Stars::new(services.db.clone()),
                 colors: colors::Colors::new(services.db.clone()),
                 descriptions: descriptions::Descriptions::new(services.db.clone()),
+                links: links::Links::new(services.db.clone()),
+                link_origin: services.link_origin,
                 settings: settings::Settings::new(services.db),
                 identity: services.identity,
                 dav: Arc::new(dav::handler(
@@ -85,8 +90,12 @@ impl Module for Drive {
                 routes: Routes {
                     api: Some(api::routes(state.clone())),
                     dav: Some(dav::routes(state.clone(), dav::Address::MyDrive)),
-                    more_dav: vec![(dav::SHARED, dav::routes(state, dav::Address::Shared))],
+                    more_dav: vec![(
+                        dav::SHARED,
+                        dav::routes(state.clone(), dav::Address::Shared),
+                    )],
                     pages: None,
+                    links: Some(link_pages::routes(state)),
                 },
                 background: None,
             })
@@ -101,6 +110,9 @@ struct DriveState {
     colors: colors::Colors,
     descriptions: descriptions::Descriptions,
     settings: settings::Settings,
+    links: links::Links,
+    /// Where link pages are, while link sharing is on.
+    link_origin: tokio::sync::watch::Receiver<Option<String>>,
     storage: Storage,
     thumbnails: Thumbnails,
     texts: Texts,

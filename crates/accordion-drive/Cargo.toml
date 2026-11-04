@@ -17,12 +17,15 @@ accordion-core = { git = "https://github.com/accordion-suite/accordion-core", ve
 accordion-module = { git = "https://github.com/accordion-suite/accordion-core", version = "0.1.0" }
 accordion-sandbox = { git = "https://github.com/accordion-suite/accordion-core", version = "0.1.0" }
 accordion-types = { git = "https://github.com/accordion-suite/accordion-core", version = "0.1.0" }
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["form"] }
+base64ct = { version = "1.8.3", features = ["alloc"] }
 bytes = "1.12.1"
 dav-server = { version = "0.11.0", default-features = false }
 futures-util = "0.3.34"
+getrandom = "0.4.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.11.1"
 tokio = { version = "1.53.3", features = ["fs", "io-util", "sync"] }
 tokio-util = { version = "0.7.20", features = ["io"] }
 tracing = "0.1.44"

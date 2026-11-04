@@ -26,6 +26,10 @@ pub struct Server {
     _dir: tempfile::TempDir,
     _stop: watch::Sender<bool>,
     pub router: Router,
+    /// The link pages, as the link sharing listener serves them.
+    pub links: Router,
+    /// Where link pages are, which link sharing being on sets.
+    pub link_origin: watch::Sender<Option<String>>,
     pub storage: Storage,
     pub thumbnails: Thumbnails,
     pub texts: Texts,
@@ -96,6 +100,8 @@ pub async fn start() -> Server {
     let events = Events::open(db.clone()).await.unwrap();
     let live = Live::new(db.clone(), &identity);
     let (stop, stopping) = watch::channel(false);
+    let (link_origin, link_origin_receiver) =
+        watch::channel(Some("https://f8q2m.accordion.example.com".to_owned()));
     let started = Drive
         .start(
             Services {
@@ -106,6 +112,7 @@ pub async fn start() -> Server {
                 texts: texts.clone(),
                 live,
                 events,
+                link_origin: link_origin_receiver,
             },
             Stopping::new(stopping),
         )
@@ -117,6 +124,13 @@ pub async fn start() -> Server {
     for (name, dav) in started.routes.more_dav {
         router = router.nest_service(&format!("/dav/{name}"), dav);
     }
+    let links = started
+        .routes
+        .links
+        .unwrap()
+        .layer(axum::extract::connect_info::MockConnectInfo(
+            std::net::SocketAddr::from(([203, 0, 113, 9], 50000)),
+        ));
     Server {
         alex: person(&identity, "alex").await,
         sam: person(&identity, "sam").await,
@@ -125,6 +139,8 @@ pub async fn start() -> Server {
         _dir: dir,
         _stop: stop,
         router,
+        links,
+        link_origin,
         storage,
         thumbnails,
         texts,
@@ -160,6 +176,36 @@ async fn person(identity: &Identity, username: &str) -> Person {
 }
 
 impl Server {
+    /// A request to the link pages, from someone on the internet.
+    pub async fn link(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: impl Into<Body>,
+    ) -> Reply {
+        let mut request = Request::builder()
+            .method(Method::from_bytes(method.as_bytes()).unwrap())
+            .uri(path);
+        for &(name, value) in headers {
+            request = request.header(name, value);
+        }
+        let response = self
+            .links
+            .clone()
+            .oneshot(request.body(body.into()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        Reply {
+            status,
+            headers,
+            body,
+        }
+    }
+
     pub async fn send(
         &self,
         method: &str,
