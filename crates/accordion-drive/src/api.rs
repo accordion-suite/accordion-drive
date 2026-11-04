@@ -38,7 +38,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::settings::{DriveSettings, NewSettings};
-use crate::{DriveState, activity, archive, colors, descriptions, links, sharing, time};
+use crate::{DriveState, activity, archive, colors, descriptions, links, sharing, sync, time};
 
 /// Says where a piece of a resumable upload starts. The name follows the
 /// tus protocol, which uses the same header for the same purpose.
@@ -110,6 +110,9 @@ pub(crate) fn routes(state: DriveState) -> Router {
             get(upload).patch(append).delete(cancel_upload),
         )
         .route("/uploads/{id}/finish", post(finish_upload))
+        .route("/sync/start", get(sync::start))
+        .route("/sync/folders/{id}", get(sync::folder))
+        .route("/sync/changes", get(sync::changes))
         .with_state(state)
 }
 
@@ -518,7 +521,7 @@ async fn write_file(
 ) -> ItemResult {
     let (folder, access) = state.reach(me.user.id, parent, Access::Editor).await?;
     let storage = state.by(&me);
-    let file = if request.get(IF_NONE_MATCH).is_some_and(|value| value == "*") {
+    let file = if new_only(&request) {
         storage.create_file(parent, &name, reader(body)).await
     } else {
         storage.write_file(parent, &name, reader(body)).await
@@ -540,7 +543,18 @@ async fn write_version(
     body: Body,
 ) -> ItemResult {
     let (item, access) = state.reach(me.user.id, id, Access::Editor).await?;
-    let base = request
+    let base = replaced(&request)?;
+    let file = state
+        .by(&me)
+        .write_version(id, base, reader(body))
+        .await
+        .map_err(|err| space_error(err, item.owner, me.user.id))?;
+    Ok(Json(state.view(me.user.id, file, access).await?))
+}
+
+/// The contents a save replaces: the SHA-256 hash in `If-Match`, quoted.
+fn replaced(request: &HeaderMap) -> Result<storage::ContentHash, ApiError> {
+    request
         .get(IF_MATCH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix('"')?.strip_suffix('"'))
@@ -550,13 +564,12 @@ async fn write_version(
                 StatusCode::PRECONDITION_REQUIRED,
                 "Say which contents this replaces, as their SHA-256 hash in If-Match.",
             )
-        })?;
-    let file = state
-        .by(&me)
-        .write_version(id, base, reader(body))
-        .await
-        .map_err(|err| space_error(err, item.owner, me.user.id))?;
-    Ok(Json(state.view(me.user.id, file, access).await?))
+        })
+}
+
+/// Whether a save asks for a new file only, with `If-None-Match: *`.
+fn new_only(request: &HeaderMap) -> bool {
+    request.get(IF_NONE_MATCH).is_some_and(|value| value == "*")
 }
 
 #[derive(Deserialize)]
@@ -1500,29 +1513,58 @@ async fn append(
     Ok(Json(upload.into()))
 }
 
+/// Where a finished upload goes: `parent` and `name`, or `file` for a new
+/// version of that file.
 #[derive(Deserialize)]
 struct FinishUpload {
-    parent: ItemId,
-    name: String,
+    parent: Option<ItemId>,
+    name: Option<String>,
+    file: Option<ItemId>,
 }
 
-/// `POST /uploads/{id}/finish`: saves a finished upload as a file, or as a
-/// new version if a file with that name is already there.
+/// `POST /uploads/{id}/finish`: saves a finished upload as the file `name`
+/// in `parent`, or as a new version if a file with that name is already
+/// there. With `If-None-Match: *`, the name must be free instead. To save
+/// over one file only while it holds the contents a device last saw, send
+/// `file` and that SHA-256 hash in `If-Match`, as `PUT /items/{id}/content`
+/// takes.
 async fn finish_upload(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
     Path(id): Path<UploadId>,
+    headers: HeaderMap,
     Json(request): Json<FinishUpload>,
 ) -> ItemResult {
     owned_upload(&state, me.user.id, id).await?;
-    let (folder, access) = state
-        .reach(me.user.id, request.parent, Access::Editor)
-        .await?;
-    let file = state
-        .by(&me)
-        .finish_upload(id, request.parent, &request.name)
-        .await
-        .map_err(|err| space_error(err, folder.owner, me.user.id))?;
+    let storage = state.by(&me);
+    let (owner, access, file) = match (request.file, request.parent, request.name) {
+        (Some(file), None, None) => {
+            let (item, access) = state.reach(me.user.id, file, Access::Editor).await?;
+            let base = replaced(&headers)?;
+            (
+                item.owner,
+                access,
+                storage.finish_upload_over(id, file, base).await,
+            )
+        }
+        (None, Some(parent), Some(name)) => {
+            let (folder, access) = state.reach(me.user.id, parent, Access::Editor).await?;
+            let saved = if new_only(&headers) {
+                storage.finish_new_upload(id, parent, &name).await
+            } else {
+                storage.finish_upload(id, parent, &name).await
+            };
+            (folder.owner, access, saved)
+        }
+        _ => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "Say where the upload goes: a `parent` folder and a `name`, or the `file` it's \
+                 a new version of.",
+            ));
+        }
+    };
+    let file = file.map_err(|err| space_error(err, owner, me.user.id))?;
     Ok(Json(state.view(me.user.id, file, access).await?))
 }
 

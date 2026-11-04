@@ -18,6 +18,7 @@ mod links;
 mod settings;
 mod sharing;
 mod stars;
+mod sync;
 mod time;
 
 use std::sync::Arc;

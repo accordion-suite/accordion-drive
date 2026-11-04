@@ -324,6 +324,7 @@ fn fs_error(err: storage::Error) -> FsError {
         | InTrash
         | NotInTrash
         | Changed
+        | StartOver
         | UploadOffset { .. }
         | UploadIncomplete { .. } => FsError::Forbidden,
         QuotaFull => FsError::InsufficientStorage,

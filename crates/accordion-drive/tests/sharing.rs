@@ -402,6 +402,13 @@ fn cases() -> Vec<Case> {
             |f| format!("/uploads/{}/finish", f.upload),
             Some(json!({ "parent": f.top, "name": "up.txt" }))
         ),
+        case!("GET", "/sync/start", Own, |f| "/sync/start".into()),
+        case!("GET", "/sync/folders/{id}", Viewer, |f| format!(
+            "/sync/folders/{}",
+            f.holiday
+        )),
+        // Each person's own list. Without a cursor, it's 410: start over.
+        case!("GET", "/sync/changes", Own, |f| "/sync/changes".into()),
     ]
 }
 
