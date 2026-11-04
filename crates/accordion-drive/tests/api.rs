@@ -1394,3 +1394,95 @@ async fn colors_describes_and_sizes_folders() {
         ["Trip/Day 1/beach.txt", "notes.txt", "Trip/map.txt"]
     );
 }
+
+#[tokio::test]
+async fn the_text_editor_saves_only_over_what_it_opened() {
+    let server = start().await;
+    let (alex, kim) = (&server.alex, &server.kim);
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let new = |name: &'static str| {
+        let path = format!("/api/drive/items/{top}/children/{name}");
+        let bearer = alex.bearer.clone();
+        let server = &server;
+        async move {
+            server
+                .send(
+                    "PUT",
+                    &path,
+                    &[("authorization", &bearer), ("if-none-match", "*")],
+                    Body::empty(),
+                )
+                .await
+        }
+    };
+    // A new text file takes a free name only.
+    let reply = new("list.md").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let file = reply.json();
+    let id = file["id"].as_str().unwrap().to_owned();
+    let opened = file["sha256"].as_str().unwrap().to_owned();
+    assert_eq!(new("list.md").await.status, StatusCode::CONFLICT);
+
+    let save = |person: &common::Person, base: Option<String>, text: &'static str| {
+        let path = format!("/api/drive/items/{id}/content");
+        let bearer = person.bearer.clone();
+        let server = &server;
+        async move {
+            let quoted = base.map(|base| format!("\"{base}\""));
+            let mut headers = vec![("authorization", bearer.as_str())];
+            if let Some(quoted) = &quoted {
+                headers.push(("if-match", quoted));
+            }
+            server.send("PUT", &path, &headers, text).await
+        }
+    };
+    let reply = save(alex, Some(opened.clone()), "# Milk").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    assert_eq!(reply.json()["size"], 6);
+    let saved = reply.json()["sha256"].as_str().unwrap().to_owned();
+
+    // A save from the old contents would lose the one before it.
+    let reply = save(alex, Some(opened), "# Eggs").await;
+    assert_eq!(reply.status, StatusCode::PRECONDITION_FAILED);
+    assert!(
+        reply.text().contains("Someone changed this file"),
+        "{}",
+        reply.text()
+    );
+    assert_eq!(
+        save(alex, None, "# Eggs").await.status,
+        StatusCode::PRECONDITION_REQUIRED
+    );
+
+    // Viewers can't save. Editors can.
+    let reply = server
+        .api(
+            alex,
+            "PUT",
+            &format!("/items/{id}/shares/{}", kim.id),
+            Some(json!({ "level": "viewer" })),
+        )
+        .await;
+    assert!(reply.status.is_success());
+    assert_eq!(
+        save(kim, Some(saved.clone()), "# Kim").await.status,
+        StatusCode::FORBIDDEN
+    );
+    server
+        .api(
+            alex,
+            "PUT",
+            &format!("/items/{id}/shares/{}", kim.id),
+            Some(json!({ "level": "editor" })),
+        )
+        .await;
+    let reply = save(kim, Some(saved), "# Kim").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.text());
+    let content = server
+        .api(alex, "GET", &format!("/items/{id}/content"), None)
+        .await;
+    assert_eq!(content.text(), "# Kim");
+}

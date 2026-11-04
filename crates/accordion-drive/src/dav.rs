@@ -323,6 +323,7 @@ fn fs_error(err: storage::Error) -> FsError {
         | ShareTopFolder
         | InTrash
         | NotInTrash
+        | Changed
         | UploadOffset { .. }
         | UploadIncomplete { .. } => FsError::Forbidden,
         QuotaFull => FsError::InsufficientStorage,

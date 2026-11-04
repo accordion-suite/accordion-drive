@@ -25,7 +25,8 @@ use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::header::{
     ACCEPT_RANGES, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
-    CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, IF_RANGE, RANGE, X_CONTENT_TYPE_OPTIONS,
+    CONTENT_SECURITY_POLICY, CONTENT_TYPE, ETAG, IF_MATCH, IF_NONE_MATCH, IF_RANGE, RANGE,
+    X_CONTENT_TYPE_OPTIONS,
 };
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -49,7 +50,7 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/items/{id}", get(item).patch(move_item).delete(trash_item))
         .route("/items/{id}/children", get(children).post(create_folder))
         .route("/items/{id}/children/{name}", put(write_file))
-        .route("/items/{id}/content", get(download))
+        .route("/items/{id}/content", get(download).put(write_version))
         .route("/items/{id}/preview", get(preview_file))
         .route("/items/{id}/preview/{name}", get(preview_named))
         .route("/items/{id}/thumbnail", get(thumbnail))
@@ -505,20 +506,56 @@ async fn create_folder(
 }
 
 /// `PUT /items/{id}/children/{name}`: saves the request body as a file, or
-/// as a new version if a file with that name is already there. For large
-/// files, use a resumable upload instead.
+/// as a new version if a file with that name is already there. With
+/// `If-None-Match: *`, the name must be free instead. For large files, use
+/// a resumable upload instead.
 async fn write_file(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
     Path((parent, name)): Path<(ItemId, String)>,
+    request: HeaderMap,
     body: Body,
 ) -> ItemResult {
     let (folder, access) = state.reach(me.user.id, parent, Access::Editor).await?;
+    let storage = state.by(&me);
+    let file = if request.get(IF_NONE_MATCH).is_some_and(|value| value == "*") {
+        storage.create_file(parent, &name, reader(body)).await
+    } else {
+        storage.write_file(parent, &name, reader(body)).await
+    }
+    .map_err(|err| space_error(err, folder.owner, me.user.id))?;
+    Ok(Json(state.view(me.user.id, file, access).await?))
+}
+
+/// `PUT /items/{id}/content`: saves the request body as the file's new
+/// version, as the web app's text editor does. `If-Match` holds the SHA-256
+/// hash of the contents the editor opened, quoted, and the save is refused
+/// if the file holds anything else by now, so nobody's changes are lost
+/// without them knowing.
+async fn write_version(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path(id): Path<ItemId>,
+    request: HeaderMap,
+    body: Body,
+) -> ItemResult {
+    let (item, access) = state.reach(me.user.id, id, Access::Editor).await?;
+    let base = request
+        .get(IF_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix('"')?.strip_suffix('"'))
+        .and_then(storage::ContentHash::from_hex)
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::PRECONDITION_REQUIRED,
+                "Say which contents this replaces, as their SHA-256 hash in If-Match.",
+            )
+        })?;
     let file = state
         .by(&me)
-        .write_file(parent, &name, reader(body))
+        .write_version(id, base, reader(body))
         .await
-        .map_err(|err| space_error(err, folder.owner, me.user.id))?;
+        .map_err(|err| space_error(err, item.owner, me.user.id))?;
     Ok(Json(state.view(me.user.id, file, access).await?))
 }
 

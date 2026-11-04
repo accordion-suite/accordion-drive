@@ -213,6 +213,12 @@ fn cases() -> Vec<Case> {
             "/items/{}/content",
             f.photo
         )),
+        // Access is checked before If-Match, so without one, anyone allowed
+        // gets 428 rather than 403 or "not found".
+        case!("PUT", "/items/{id}/content", Editor, |f| format!(
+            "/items/{}/content",
+            f.photo
+        )),
         case!("GET", "/items/{id}/preview", Viewer, |f| format!(
             "/items/{}/preview",
             f.photo
