@@ -843,6 +843,38 @@ async fn a_new_folder_with_a_deleted_folders_name_stays_separate() {
     );
 }
 
+/// Found by hand on November 5, 2026: a file in Accordion with a name this
+/// device ignores, such as a note Windows adds to downloaded files, was
+/// downloaded, then read as deleted here, and moved to the trash.
+#[tokio::test]
+async fn a_file_with_a_name_this_device_ignores_stays_in_accordion() {
+    let server = start().await;
+    let origin = serve(&server).await;
+    let token = server.alex.bearer["Bearer ".len()..].to_owned();
+    let top = server.storage.top_folder(server.alex.id).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut laptop = device(dir.path(), "Laptop");
+
+    server.file(top, "photo.jpg", "a photo").await;
+    server
+        .file(top, "photo.jpg:Zone.Identifier", "[ZoneTransfer]")
+        .await;
+    for _ in 0..3 {
+        laptop.engine(&origin, &token).sync().await.unwrap();
+    }
+    assert!(laptop.my_drive().join("photo.jpg").is_file());
+    assert!(!laptop.my_drive().join("photo.jpg:Zone.Identifier").exists());
+    assert!(
+        server
+            .storage
+            .find(top, vec!["photo.jpg:Zone.Identifier".into()])
+            .await
+            .unwrap()
+            .is_some(),
+        "the note was moved to the trash"
+    );
+}
+
 /// Found by seed 28 at 1,000 steps: a file moved out of a folder in
 /// Accordion, while a device moved the folder, stayed in the folder on the
 /// device, which thought the server had moved it there too.
