@@ -31,7 +31,9 @@ use std::time::{Duration, SystemTime};
 
 use accordion_core::storage::{ItemKind, Storage};
 use accordion_sync::client::Client;
+use accordion_sync::client::RemoteItem;
 use accordion_sync::engine::{Engine, MY_DRIVE, hash_file};
+use accordion_sync::on_demand::{OnDemand, Status};
 use accordion_sync::state::State;
 use accordion_types::ItemId;
 use axum::body::Body;
@@ -1064,4 +1066,73 @@ async fn a_folder_moved_here_keeps_its_contents_apart_from_a_new_one_in_its_plac
         local_tree(&desktop.my_drive()),
         server_tree(&server.storage, top).await
     );
+}
+
+/// Files on demand that keep their contents, and note each item the engine
+/// marks as synced, as File Explorer's check mark shows.
+#[derive(Default)]
+struct Marks(Mutex<Vec<PathBuf>>);
+
+impl OnDemand for Marks {
+    fn place(&self, item: &RemoteItem, at: &Path) -> std::io::Result<()> {
+        if item.is_folder() {
+            fs::create_dir_all(at)
+        } else {
+            Err(std::io::Error::other("this test only adds files here"))
+        }
+    }
+
+    fn synced(&self, _item: &RemoteItem, at: &Path) -> std::io::Result<()> {
+        self.0.lock().unwrap().push(at.to_owned());
+        Ok(())
+    }
+
+    fn status(&self, _at: &Path) -> Status {
+        Status::Ordinary
+    }
+}
+
+/// Found on a Windows PC: a file or folder renamed here kept File
+/// Explorer's waiting-to-sync arrows after the rename reached Accordion.
+#[tokio::test]
+async fn a_file_renamed_here_is_marked_synced_again() {
+    let server = start().await;
+    let origin = serve(&server).await;
+    let token = server.alex.bearer["Bearer ".len()..].to_owned();
+    let dir = tempfile::tempdir().unwrap();
+    let laptop = device(dir.path(), "Laptop");
+    let marks = Arc::new(Marks::default());
+    let mut engine = Engine::new(
+        Client::new(&origin, Some(token)).unwrap(),
+        State::open(&laptop.db).unwrap(),
+        laptop.root.clone(),
+        laptop.name.clone(),
+    )
+    .with_on_demand(marks.clone());
+
+    engine.sync().await.unwrap();
+    fs::create_dir(laptop.my_drive().join("New folder")).unwrap();
+    write(&laptop.my_drive().join("New folder/spartan.png"), "armor");
+    engine.sync().await.unwrap();
+    marks.0.lock().unwrap().clear();
+
+    fs::rename(
+        laptop.my_drive().join("New folder"),
+        laptop.my_drive().join("Photos"),
+    )
+    .unwrap();
+    fs::rename(
+        laptop.my_drive().join("Photos/spartan.png"),
+        laptop.my_drive().join("Photos/halo.png"),
+    )
+    .unwrap();
+    engine.sync().await.unwrap();
+
+    let marked = marks.0.lock().unwrap().clone();
+    for path in ["Photos", "Photos/halo.png"] {
+        assert!(
+            marked.contains(&laptop.my_drive().join(path)),
+            "{path} wasn't marked synced: {marked:?}"
+        );
+    }
 }

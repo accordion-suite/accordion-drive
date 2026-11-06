@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "accordion-core"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#a3941def5392dc0841b13007460482f585530c0f"
+source = "git+https://github.com/accordion-suite/accordion-core#89ed7d178462a38747f8e205c52af67fa74d203d"
 dependencies = [
  "accordion-sandbox",
  "accordion-types",
@@ -59,7 +59,7 @@ dependencies = [
 [[package]]
 name = "accordion-module"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#a3941def5392dc0841b13007460482f585530c0f"
+source = "git+https://github.com/accordion-suite/accordion-core#89ed7d178462a38747f8e205c52af67fa74d203d"
 dependencies = [
  "accordion-core",
  "accordion-types",
@@ -73,7 +73,7 @@ dependencies = [
 [[package]]
 name = "accordion-sandbox"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#a3941def5392dc0841b13007460482f585530c0f"
+source = "git+https://github.com/accordion-suite/accordion-core#89ed7d178462a38747f8e205c52af67fa74d203d"
 dependencies = [
  "landlock",
  "libc",
@@ -85,9 +85,9 @@ dependencies = [
 [[package]]
 name = "accordion-sync"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#a3941def5392dc0841b13007460482f585530c0f"
+source = "git+https://github.com/accordion-suite/accordion-core#89ed7d178462a38747f8e205c52af67fa74d203d"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "bytes",
  "gotatun",
  "http-body-util",
@@ -113,7 +113,7 @@ dependencies = [
 [[package]]
 name = "accordion-types"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#a3941def5392dc0841b13007460482f585530c0f"
+source = "git+https://github.com/accordion-suite/accordion-core#89ed7d178462a38747f8e205c52af67fa74d203d"
 dependencies = [
  "serde",
  "uuid",
@@ -219,6 +219,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64ct"
@@ -867,7 +873,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e37c2134d46523ed5b3c4bbdb578225e2e7379d03aea65baef41584725b1991"
 dependencies = [
  "aead",
- "base64",
+ "base64 0.22.1",
  "bitfield-struct",
  "blake2 0.10.6",
  "bytes",
@@ -960,7 +966,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2700e3fe555c3310aa7286cac6167449f2c87e0eb58769c9208a1c58a1d106"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "headers-core",
  "http",
