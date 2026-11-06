@@ -363,6 +363,7 @@ fn cases() -> Vec<Case> {
             f.trashed
         )),
         case!("GET", "/usage", Own, |f| "/usage".into()),
+        case!("GET", "/retention", Own, |f| "/retention".into()),
         case!("GET", "/recent", Own, |f| "/recent".into()),
         case!("GET", "/starred", Own, |f| "/starred".into()),
         case!("GET", "/search", Own, |f| "/search?q=beach".into()),

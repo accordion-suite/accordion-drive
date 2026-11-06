@@ -99,6 +99,7 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/trash", get(trash).delete(empty_trash))
         .route("/trash/{id}", delete(delete_forever))
         .route("/usage", get(usage))
+        .route("/retention", get(retention))
         .route("/recent", get(recent))
         .route("/starred", get(starred))
         .route("/search", get(search))
@@ -1441,6 +1442,27 @@ async fn usage(
     Authenticated(me): Authenticated,
 ) -> Result<Json<UsageView>, ApiError> {
     Ok(Json(state.storage.usage(me.user.id).await?.into()))
+}
+
+/// How long the server keeps trash and older versions, which the admin
+/// chooses.
+#[derive(Serialize)]
+struct RetentionView {
+    trash_days: u32,
+    version_days: u32,
+}
+
+/// `GET /retention`: how long trash and older versions are kept, so the
+/// Trash page and version history can say.
+async fn retention(
+    State(state): State<DriveState>,
+    Authenticated(_): Authenticated,
+) -> Result<Json<RetentionView>, ApiError> {
+    let retention = state.storage.retention().await?;
+    Ok(Json(RetentionView {
+        trash_days: retention.trash_days,
+        version_days: retention.version_days,
+    }))
 }
 
 #[derive(Deserialize)]

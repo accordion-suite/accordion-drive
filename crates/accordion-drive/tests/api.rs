@@ -382,6 +382,16 @@ async fn resumes_uploads() {
 }
 
 #[tokio::test]
+async fn says_how_long_trash_and_versions_are_kept() {
+    let server = start().await;
+    let retention = server
+        .api(&server.alex, "GET", "/retention", None)
+        .await
+        .json();
+    assert_eq!(retention, json!({ "trash_days": 30, "version_days": 30 }));
+}
+
+#[tokio::test]
 async fn nobody_reaches_anyone_elses_files() {
     let server = start().await;
     let (alex, sam) = (&server.alex, &server.sam);

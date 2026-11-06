@@ -321,6 +321,7 @@ fn fs_error(err: storage::Error) -> FsError {
         | GiveToSelf
         | ShareWithOwner
         | ShareTopFolder
+        | InvalidRetention
         | InTrash
         | NotInTrash
         | Changed
