@@ -105,6 +105,7 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/search", get(search))
         .route("/zip", get(zip_download))
         .route("/settings", get(get_settings).put(put_settings))
+        .route("/types", get(get_types))
         .route("/uploads", post(start_upload))
         .route(
             "/uploads/{id}",
@@ -139,6 +140,10 @@ pub(crate) struct ItemView {
     /// WebP, or "text", its first lines. Core makes them in the background,
     /// so a new photo gets one soon.
     thumbnail: Option<&'static str>,
+    /// For files: which of [`TYPES`] it is, such as "photos", or null for
+    /// none. The web app shows its icon by this.
+    #[serde(rename = "type")]
+    file_type: Option<&'static str>,
     created_at: String,
     modified_at: String,
     /// When it was deleted, if it's in the trash itself.
@@ -204,14 +209,16 @@ impl ItemView {
             (None, None) => None,
         };
         let preview_partial = document.is_some_and(|document| document.partial);
-        let thumbnail = blob
+        let found = blob
             .and_then(|blob| thumbnails.find(blob.hash))
-            .and_then(|thumbnail| match thumbnail.kind {
-                ThumbnailKind::Picture => Some("picture"),
-                // A song or a video that happens to be text, such as a
-                // placeholder, would look broken as a page of text.
-                ThumbnailKind::Text => text_kind(&item.name).then_some("text"),
-            });
+            .map(|thumbnail| thumbnail.kind);
+        let file_type = blob.and_then(|_| item_type(&item.name, found));
+        let thumbnail = found.and_then(|kind| match kind {
+            ThumbnailKind::Picture => Some("picture"),
+            // A song or a video that happens to be text, such as a
+            // placeholder, would look broken as a page of text.
+            ThumbnailKind::Text => text_kind(file_type).then_some("text"),
+        });
         Self {
             id: item.id,
             parent: item.parent,
@@ -223,6 +230,7 @@ impl ItemView {
             preview,
             preview_partial,
             thumbnail,
+            file_type,
             created_at: item.created_at,
             modified_at: item.modified_at,
             trashed_at: item.trashed_at,
@@ -941,56 +949,284 @@ struct PieceView {
     matched: bool,
 }
 
-/// The kinds of file a search can look for, as Google Drive's type filter
-/// offers, by the extensions their names end in.
+/// The kinds of file, each with the extensions its files end in. An
+/// extension two programs share goes to the more common one (decision 26):
+/// ".sln" is a Visual Studio solution, not telephone audio. The web app gets
+/// this list from `GET /types`, so there's only the one.
 pub(crate) const TYPES: &[(&str, &[&str])] = &[
     (
         "documents",
-        &["doc", "docx", "odt", "rtf", "txt", "md", "pages"],
+        &[
+            "doc", "docx", "docm", "dot", "dotx", "dotm", "odt", "ott", "fodt", "rtf", "txt", "md",
+            "markdown", "pages", "wpd", "wps", "tex", "rst",
+        ],
     ),
     (
         "spreadsheets",
-        &["xls", "xlsx", "ods", "csv", "tsv", "numbers"],
+        &[
+            "xls", "xlsx", "xlsm", "xlsb", "xlt", "xltx", "xltm", "ods", "ots", "fods", "csv",
+            "tsv", "numbers",
+        ],
     ),
-    ("presentations", &["ppt", "pptx", "odp", "key"]),
+    (
+        "presentations",
+        &[
+            "ppt", "pptx", "pptm", "pps", "ppsx", "pot", "potx", "odp", "otp", "fodp", "key",
+        ],
+    ),
     ("pdfs", &["pdf"]),
     (
         "photos",
         &[
-            "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "avif", "bmp", "tif", "tiff",
-            "svg", "dng", "raw",
+            "jpg", "jpeg", "jfif", "jpe", "png", "apng", "gif", "webp", "heic", "heif", "avif",
+            "jxl", "bmp", "tif", "tiff", "svg", "svgz", "ico", "cur", "jp2", "j2k", "jpf", "jpx",
+            "tga", "pcx", "pict", "pct", "pcd", "dds", "exr", "hdr", "sgi", "ras", "xwd", "wbmp",
+            "pbm", "pgm", "ppm", "pnm", "pam", "xbm", "xpm", "mng", "qoi", "fits", "fts",
+            // Camera raw
+            "dng", "raw", "arw", "srf", "sr2", "cr2", "cr3", "crw", "nef", "nrw", "orf", "pef",
+            "raf", "rw2", "rwl", "srw", "erf", "3fr", "iiq", "x3f", "mrw", "kdc", "dcr",
         ],
     ),
     (
         "videos",
         &[
-            "mp4", "mov", "m4v", "mkv", "webm", "avi", "wmv", "3gp", "mts",
+            "mp4", "mov", "qt", "m4v", "mkv", "webm", "avi", "divx", "wmv", "asf", "3gp", "3g2",
+            "mts", "m2ts", "m2t", "mpg", "mpeg", "mpe", "vob", "m2v", "flv", "f4v", "ogv", "ogm",
+            "mxf", "rm", "rmvb", "wtv", "dvr-ms", "dv", "mjpeg", "mjpg", "hevc", "h264", "h265",
         ],
     ),
     (
         "audio",
         &[
-            "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "wma", "aiff",
+            "mp3", "m4a", "m4b", "m4r", "aac", "wav", "flac", "ogg", "oga", "opus", "spx", "wma",
+            "aiff", "aif", "aifc", "mp2", "ac3", "dts", "amr", "ape", "wv", "tta", "au", "snd",
+            "caf", "mka", "ra", "w64", "mid", "midi", "kar", "mod", "xm", "s3m", "it", "dsf",
+            "dff",
+            // Older formats, from Amiga, Atari, classic Mac, Sound Blaster,
+            // telephone, and speech research audio.
+            "8svx", "amb", "avr", "cdda", "cvsd", "cvu", "dvms", "fssd", "gsrt", "hcom", "ircam",
+            "maud", "nist", "pvf", "sndr", "sndt", "sph", "txw", "voc",
         ],
     ),
     (
         "archives",
-        &["zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz"],
+        &[
+            "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "tbz2", "xz", "txz", "zst", "lz",
+            "lzma", "lz4", "cab", "iso", "dmg",
+        ],
+    ),
+    (
+        "code",
+        &[
+            "js",
+            "mjs",
+            "cjs",
+            "jsx",
+            "ts",
+            "cts",
+            "tsx",
+            "rs",
+            "go",
+            "c",
+            "h",
+            "cc",
+            "cpp",
+            "cxx",
+            "hpp",
+            "hh",
+            "java",
+            "kt",
+            "kts",
+            "scala",
+            "groovy",
+            "gradle",
+            "cs",
+            "fs",
+            "fsx",
+            "swift",
+            "php",
+            "py",
+            "pyw",
+            "ipynb",
+            "rb",
+            "sh",
+            "bash",
+            "zsh",
+            "fish",
+            "ps1",
+            "psm1",
+            "bat",
+            "cmd",
+            "sql",
+            "pl",
+            "pm",
+            "vb",
+            "vbs",
+            "bas",
+            "lua",
+            "r",
+            "dart",
+            "ex",
+            "exs",
+            "erl",
+            "hs",
+            "ml",
+            "clj",
+            "elm",
+            "jl",
+            "nim",
+            "zig",
+            "asm",
+            "html",
+            "htm",
+            "css",
+            "scss",
+            "sass",
+            "less",
+            "vue",
+            "svelte",
+            "json",
+            "jsonc",
+            "xml",
+            "yml",
+            "yaml",
+            "toml",
+            "ini",
+            "conf",
+            "cfg",
+            "properties",
+            "sln",
+            "csproj",
+            "vbproj",
+            "fsproj",
+            "vcxproj",
+            "htaccess",
+        ],
+    ),
+    (
+        "fonts",
+        &[
+            "ttf", "otf", "ttc", "otc", "woff", "woff2", "eot", "fon", "fnt", "pfb", "pfm", "pfa",
+            "afm", "bdf", "pcf",
+        ],
+    ),
+    (
+        "ebooks",
+        &[
+            "epub", "mobi", "azw", "azw3", "kf8", "kfx", "prc", "fb2", "lit", "lrf", "ibooks",
+            "djvu", "djv", "cbz", "cbr", "cb7",
+        ],
+    ),
+    (
+        "designs",
+        &[
+            "psd",
+            "psb",
+            "ai",
+            "xcf",
+            "sketch",
+            "fig",
+            "xd",
+            "indd",
+            "idml",
+            "afdesign",
+            "afphoto",
+            "afpub",
+            "kra",
+            "clip",
+            "procreate",
+            "cdr",
+            "eps",
+            "ora",
+        ],
     ),
 ];
 
-/// Which of [`TYPES`] a file is, by its name's extension. A name that only
-/// starts with a dot, such as `.bashrc`, has no extension.
+/// Whole names that are code, without an extension or with one that means
+/// something else alone, such as `CMakeLists.txt`. Compared in lowercase.
+const CODE_NAMES: &[&str] = &[
+    "makefile",
+    "gnumakefile",
+    "dockerfile",
+    "containerfile",
+    "jenkinsfile",
+    "vagrantfile",
+    "gemfile",
+    "rakefile",
+    "procfile",
+    "cmakelists.txt",
+    ".htaccess",
+    ".gitignore",
+    ".gitattributes",
+    ".gitmodules",
+    ".dockerignore",
+    ".editorconfig",
+    ".env",
+    ".npmrc",
+    ".bashrc",
+    ".bash_profile",
+    ".zshrc",
+    ".profile",
+];
+
+/// Extensions that two common kinds of file share, which a file's contents
+/// tell apart: the kind for text, then the kind for anything with a
+/// picture, such as a video's frame.
+const SHARED_EXTENSIONS: &[(&str, &str, &str)] =
+    &[("ts", "code", "videos"), ("mts", "code", "videos")];
+
+/// Which of [`TYPES`] a file is, by its name. A name that only starts with a
+/// dot, such as `.zip`, has no extension, though some such names are code,
+/// such as `.bashrc`.
 pub(crate) fn file_type(name: &str) -> Option<&'static str> {
-    let (stem, extension) = name.rsplit_once('.')?;
+    let lower = name.to_lowercase();
+    if CODE_NAMES.contains(&lower.as_str()) {
+        return Some("code");
+    }
+    let (stem, extension) = lower.rsplit_once('.')?;
     if stem.is_empty() {
         return None;
     }
-    let extension = extension.to_lowercase();
     TYPES
         .iter()
-        .find(|(_, extensions)| extensions.contains(&extension.as_str()))
+        .find(|(_, extensions)| extensions.contains(&extension))
         .map(|(kind, _)| *kind)
+}
+
+/// Which of [`TYPES`] a file is, by its name, unless its thumbnail shows
+/// what it is better: a `.ts` file is TypeScript or a TV recording.
+pub(crate) fn item_type(name: &str, thumbnail: Option<ThumbnailKind>) -> Option<&'static str> {
+    let shared = name.rsplit_once('.').and_then(|(_, extension)| {
+        SHARED_EXTENSIONS
+            .iter()
+            .find(|(known, _, _)| extension.eq_ignore_ascii_case(known))
+    });
+    match (shared, thumbnail) {
+        (Some((_, text, _)), Some(ThumbnailKind::Text)) => Some(text),
+        (Some((_, _, picture)), Some(ThumbnailKind::Picture)) => Some(picture),
+        _ => file_type(name),
+    }
+}
+
+/// The types and what they're made of, for the web app: each extension's
+/// type, and whole names that are code.
+#[derive(Serialize)]
+struct TypesView {
+    extensions: std::collections::BTreeMap<&'static str, &'static str>,
+    names: std::collections::BTreeMap<&'static str, &'static str>,
+}
+
+/// `GET /types`: [`TYPES`], so the web app shows the same types as search.
+async fn get_types(Authenticated(_): Authenticated) -> Json<TypesView> {
+    Json(TypesView {
+        extensions: TYPES
+            .iter()
+            .flat_map(|(kind, extensions)| {
+                extensions.iter().map(move |extension| (*extension, *kind))
+            })
+            .collect(),
+        names: CODE_NAMES.iter().map(|name| (*name, "code")).collect(),
+    })
 }
 
 /// `GET /search`: the user's items outside the trash, and items in what
@@ -1625,17 +1861,13 @@ pub(crate) enum Preview {
     Audio(&'static str),
 }
 
-/// Whether a file's name lets it show as text: a document, a spreadsheet,
-/// or a type Accordion doesn't know, such as code.
-fn text_kind(name: &str) -> bool {
-    let Some((_, extension)) = name.rsplit_once('.') else {
-        return true;
-    };
-    let extension = extension.to_ascii_lowercase();
-    TYPES
-        .iter()
-        .find(|(_, extensions)| extensions.contains(&extension.as_str()))
-        .is_none_or(|(kind, _)| matches!(*kind, "documents" | "spreadsheets"))
+/// Whether a file of this type can show as text: a document, a
+/// spreadsheet, code, or a type Accordion doesn't know.
+fn text_kind(file_type: Option<&str>) -> bool {
+    matches!(
+        file_type,
+        None | Some("documents" | "spreadsheets" | "code")
+    )
 }
 
 /// Whether the browser can show a file, going by its name's extension.
@@ -1648,7 +1880,7 @@ fn text_kind(name: &str) -> bool {
 pub(crate) fn preview(name: &str) -> Option<Preview> {
     let (_, extension) = name.rsplit_once('.')?;
     let image = match extension.to_ascii_lowercase().as_str() {
-        "jpg" | "jpeg" => "image/jpeg",
+        "jpg" | "jpeg" | "jfif" | "jpe" => "image/jpeg",
         "png" => "image/png",
         "gif" => "image/gif",
         "webp" => "image/webp",
@@ -1662,7 +1894,8 @@ pub(crate) fn preview(name: &str) -> Option<Preview> {
         "mp4" | "m4v" | "mov" => return Some(Preview::Video("video/mp4")),
         "webm" => return Some(Preview::Video("video/webm")),
         "mp3" => return Some(Preview::Audio("audio/mpeg")),
-        "m4a" => return Some(Preview::Audio("audio/mp4")),
+        // Audiobooks and iPhone ringtones are M4A files by another name.
+        "m4a" | "m4b" | "m4r" => return Some(Preview::Audio("audio/mp4")),
         "aac" => return Some(Preview::Audio("audio/aac")),
         "ogg" | "oga" | "opus" => return Some(Preview::Audio("audio/ogg")),
         "wav" => return Some(Preview::Audio("audio/wav")),
@@ -1875,5 +2108,83 @@ mod tests {
             "attachment; filename=\"_n_code _quoted_.txt\"; \
              filename*=UTF-8''%C3%9Cn%C3%AFcode%20%22quoted%22.txt"
         );
+    }
+
+    #[test]
+    fn gives_each_extension_one_type() {
+        let mut seen = std::collections::HashMap::new();
+        for (kind, extensions) in TYPES {
+            for extension in *extensions {
+                assert_eq!(
+                    extension.to_lowercase(),
+                    *extension,
+                    "{extension} isn't lowercase"
+                );
+                if let Some(other) = seen.insert(*extension, *kind) {
+                    panic!("{extension} is in both {other} and {kind}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn knows_files_by_their_most_common_use() {
+        assert_eq!(file_type("Budget.XLSX"), Some("spreadsheets"));
+        assert_eq!(file_type("App.sln"), Some("code"));
+        assert_eq!(file_type("Helvetica.pfm"), Some("fonts"));
+        assert_eq!(file_type("Novel.prc"), Some("ebooks"));
+        assert_eq!(file_type("Poster.psd"), Some("designs"));
+        assert_eq!(file_type("Makefile"), Some("code"));
+        assert_eq!(file_type("CMakeLists.txt"), Some("code"));
+        assert_eq!(file_type(".bashrc"), Some("code"));
+        assert_eq!(file_type("notes.txt"), Some("documents"));
+        assert_eq!(file_type(".zip"), None);
+        assert_eq!(file_type("tree.paf"), None);
+    }
+
+    #[test]
+    fn tells_shared_extensions_apart_by_their_contents() {
+        assert_eq!(item_type("main.ts", None), Some("code"));
+        assert_eq!(
+            item_type("main.ts", Some(ThumbnailKind::Text)),
+            Some("code")
+        );
+        assert_eq!(
+            item_type("Match.TS", Some(ThumbnailKind::Picture)),
+            Some("videos")
+        );
+        assert_eq!(item_type("clip.mts", None), Some("videos"));
+        assert_eq!(
+            item_type("module.mts", Some(ThumbnailKind::Text)),
+            Some("code")
+        );
+        // Only shared extensions: a photo's type doesn't follow its thumbnail.
+        assert_eq!(
+            item_type("scan.png", Some(ThumbnailKind::Text)),
+            Some("photos")
+        );
+        assert!(text_kind(Some("code")));
+        assert!(!text_kind(Some("videos")));
+    }
+
+    #[test]
+    fn previews_jpegs_and_m4a_files_by_any_of_their_names() {
+        assert!(matches!(
+            preview("scan.JFIF"),
+            Some(Preview::Image("image/jpeg"))
+        ));
+        assert!(matches!(
+            preview("scan.jpe"),
+            Some(Preview::Image("image/jpeg"))
+        ));
+        assert!(matches!(
+            preview("Ringtone.m4r"),
+            Some(Preview::Audio("audio/mp4"))
+        ));
+        assert!(matches!(
+            preview("Book.m4b"),
+            Some(Preview::Audio("audio/mp4"))
+        ));
+        assert!(preview("drawing.svg").is_none());
     }
 }

@@ -729,6 +729,22 @@ const ICONS: &[(&str, &str)] = &[
         "M6 2h12a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m5 1v2h2V3zm0 2v2h-2v2h2v2h-2v2h2v2.5a1.5 1.5 0 1 0 2 0V13h-2v-2h2V9h-2V7h2V5z",
     ),
     (
+        "code",
+        "M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m4.3 8.9L7 14.2l3.3 3.3 1-1-2.3-2.3 2.3-2.3zm3.4 0-1 1 2.3 2.3-2.3 2.3 1 1 3.3-3.3z",
+    ),
+    (
+        "fonts",
+        "M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m6 7.5L8.2 18h1.7l.8-1.9h2.6l.8 1.9h1.7zm-.9 5.1.9-2.2.9 2.2z",
+    ),
+    (
+        "ebooks",
+        "M6 2h12a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m1.5 0v20H9V2zm3.5 5v1.6h6V7zm0 3v1.6h4V10z",
+    ),
+    (
+        "designs",
+        "M12 3a9 9 0 0 0 0 18c1 0 1.6-.7 1.6-1.6 0-.5-.2-.8-.5-1.1-.3-.3-.5-.7-.5-1.1 0-.9.7-1.6 1.6-1.6H16a5 5 0 0 0 5-5c0-4-4-7.6-9-7.6M7.5 10.1a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8m2.5-4a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8m4.5 0a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8m2.6 3.6a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8",
+    ),
+    (
         "file",
         "M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m7 1.5V9h5.5z",
     ),
@@ -746,7 +762,7 @@ fn icon_html(item: &Item, size: &str) -> String {
         .map_or("", |(_, shape)| shape);
     format!(
         "<svg class=\"icon {size} kind-{kind}\" viewBox=\"0 0 24 24\" aria-hidden=\"true\" \
-         focusable=\"false\" fill=\"currentColor\"><path d=\"{shape}\"/></svg>"
+         focusable=\"false\" fill=\"currentColor\"><path fill-rule=\"evenodd\" d=\"{shape}\"/></svg>"
     )
 }
 
@@ -924,6 +940,8 @@ mod tests {
         assert_eq!(api::file_type("Budget.ODS"), Some("spreadsheets"));
         assert_eq!(api::file_type("server.log"), None);
         assert_eq!(api::file_type(".zip"), None);
+        assert_eq!(api::file_type("Wedding.VOB"), Some("videos"));
+        assert_eq!(api::file_type("Ringtone.m4r"), Some("audio"));
     }
 
     #[test]

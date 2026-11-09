@@ -369,6 +369,8 @@ fn cases() -> Vec<Case> {
         case!("GET", "/search", Own, |f| "/search?q=beach".into()),
         case!("GET", "/zip", Viewer, |f| format!("/zip?ids={}", f.photo)),
         case!("GET", "/settings", Own, |f| "/settings".into()),
+        // The same list for everyone who's signed in.
+        case!("GET", "/types", Own, |f| "/types".into()),
         case!(
             "PUT",
             "/settings",

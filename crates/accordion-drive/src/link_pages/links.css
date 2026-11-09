@@ -20,6 +20,10 @@
   --kind-videos: #b5179e;
   --kind-audio: #7048c8;
   --kind-archives: #6b5a45;
+  --kind-code: #0e7c86;
+  --kind-fonts: #a8326e;
+  --kind-ebooks: #8a6d00;
+  --kind-designs: #4f46e5;
   --kind-file: #6b7685;
 }
 
@@ -42,6 +46,10 @@
     --kind-videos: #e57ad2;
     --kind-audio: #a98bf0;
     --kind-archives: #c4ad8e;
+    --kind-code: #5ccad3;
+    --kind-fonts: #f28cbc;
+    --kind-ebooks: #e0c25a;
+    --kind-designs: #a5a1f7;
     --kind-file: #a4adba;
   }
 }
@@ -217,6 +225,22 @@ audio {
 
 .kind-archives {
   color: var(--kind-archives);
+}
+
+.kind-code {
+  color: var(--kind-code);
+}
+
+.kind-fonts {
+  color: var(--kind-fonts);
+}
+
+.kind-ebooks {
+  color: var(--kind-ebooks);
+}
+
+.kind-designs {
+  color: var(--kind-designs);
 }
 
 .kind-file {
