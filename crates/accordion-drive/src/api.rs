@@ -200,12 +200,16 @@ impl ItemView {
             ItemKind::File { version, blob } => ("file", Some(version), Some(blob)),
         };
         let document = blob.and_then(|blob| thumbnails.preview(blob.hash));
+        let picture = blob.is_some_and(|blob| thumbnails.picture(blob.hash).is_some());
         let preview = match (blob.and(preview(&item.name)), &document) {
             (Some(Preview::Image(_)), _) => Some("image"),
             (Some(Preview::Pdf), _) => Some("pdf"),
             (Some(Preview::Video(_)), _) => Some("video"),
             (Some(Preview::Audio(_)), _) => Some("audio"),
             (None, Some(_)) => Some("document"),
+            // A picture the browser can't show, such as a HEIC, which core
+            // has made a large WebP of.
+            (None, None) if picture => Some("image"),
             (None, None) => None,
         };
         let preview_partial = document.is_some_and(|document| document.partial);
@@ -981,7 +985,7 @@ pub(crate) const TYPES: &[(&str, &[&str])] = &[
             "jpg", "jpeg", "jfif", "jpe", "png", "apng", "gif", "webp", "heic", "heif", "avif",
             "jxl", "bmp", "tif", "tiff", "svg", "svgz", "ico", "cur", "jp2", "j2k", "jpf", "jpx",
             "tga", "pcx", "pict", "pct", "pcd", "dds", "exr", "hdr", "sgi", "ras", "xwd", "wbmp",
-            "pbm", "pgm", "ppm", "pnm", "pam", "xbm", "xpm", "mng", "qoi", "fits", "fts",
+            "pbm", "pgm", "ppm", "pnm", "pam", "xbm", "xpm", "picon", "mng", "qoi", "fits", "fts",
             // Camera raw
             "dng", "raw", "arw", "srf", "sr2", "cr2", "cr3", "crw", "nef", "nrw", "orf", "pef",
             "raf", "rw2", "rwl", "srw", "erf", "3fr", "iiq", "x3f", "mrw", "kdc", "dcr",
@@ -1449,6 +1453,9 @@ pub(crate) async fn preview_response(
         // won't run in a sandbox, so PDFs go without one.
         Some(Preview::Pdf) => ("application/pdf", "frame-ancestors 'self'"),
         None => {
+            if let Some(picture) = state.thumbnails.picture(blob.hash) {
+                return converted(request, item, blob.hash, &picture, "webp", "image/webp").await;
+            }
             let Some(document) = state.thumbnails.preview(blob.hash) else {
                 return Err(ApiError::new(
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -1483,6 +1490,40 @@ pub(crate) async fn preview_response(
     };
     let disposition = disposition("inline", &item.name);
     send_file(state, request, blob, content_type, disposition, policy).await
+}
+
+/// Sends a preview core made of a file, such as a large WebP of a HEIC,
+/// named after the file with the preview's own extension.
+async fn converted(
+    request: &HeaderMap,
+    item: &Item,
+    hash: storage::ContentHash,
+    path: &std::path::Path,
+    extension: &str,
+    content_type: &'static str,
+) -> Result<Response, ApiError> {
+    // Previews of contents that are gone are removed now and then.
+    let gone = || ApiError::new(StatusCode::NOT_FOUND, "This file doesn't have a preview.");
+    let file = tokio::fs::File::open(path).await.map_err(|_| gone())?;
+    let size = file.metadata().await.map_err(|_| gone())?.len();
+    let stem = item
+        .name
+        .rsplit_once('.')
+        .map_or(&*item.name, |(stem, _)| stem);
+    let disposition = disposition("inline", &format!("{stem}.{extension}"));
+    // Both the contents and the preview's length name this version of it,
+    // since a newer worker may make another.
+    let etag = format!("\"{hash}-{size}\"");
+    send(
+        request,
+        file,
+        size,
+        &etag,
+        content_type,
+        disposition,
+        "sandbox; frame-ancestors 'self'",
+    )
+    .await
 }
 
 /// `GET /items/{id}/preview/{name}`: the same, at an address that ends in
@@ -1880,7 +1921,10 @@ fn text_kind(file_type: Option<&str>) -> bool {
 pub(crate) fn preview(name: &str) -> Option<Preview> {
     let (_, extension) = name.rsplit_once('.')?;
     let image = match extension.to_ascii_lowercase().as_str() {
-        "jpg" | "jpeg" | "jfif" | "jpe" => "image/jpeg",
+        // A stereo JPEG shows as its two pictures side by side.
+        "jpg" | "jpeg" | "jfif" | "jpe" | "jps" => "image/jpeg",
+        // Browsers read cursors with the same decoder as icons.
+        "ico" | "cur" => "image/x-icon",
         "png" => "image/png",
         "gif" => "image/gif",
         "webp" => "image/webp",
@@ -2184,6 +2228,14 @@ mod tests {
         assert!(matches!(
             preview("Book.m4b"),
             Some(Preview::Audio("audio/mp4"))
+        ));
+        assert!(matches!(
+            preview("pair.JPS"),
+            Some(Preview::Image("image/jpeg"))
+        ));
+        assert!(matches!(
+            preview("favicon.ico"),
+            Some(Preview::Image("image/x-icon"))
         ));
         assert!(preview("drawing.svg").is_none());
     }
