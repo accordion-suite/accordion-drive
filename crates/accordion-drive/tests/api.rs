@@ -1116,6 +1116,16 @@ async fn sends_thumbnails_once_core_makes_them() {
         .await
         .json();
     assert_eq!(item["thumbnail"], json!("picture"));
+    // Browsers keep thumbnails for a year, so the web app puts the version
+    // in the address, and one made again gets a new one.
+    let version = item["thumbnail_version"].as_str().unwrap().to_owned();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(server.thumbnails.make_now(hash).await.unwrap());
+    let again = server
+        .api(alex, "GET", &format!("/items/{id}"), None)
+        .await
+        .json();
+    assert_ne!(again["thumbnail_version"], json!(version));
     let reply = server
         .api(alex, "GET", &format!("/items/{id}/thumbnail"), None)
         .await;

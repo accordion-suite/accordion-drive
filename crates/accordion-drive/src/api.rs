@@ -140,6 +140,10 @@ pub(crate) struct ItemView {
     /// WebP, or "text", its first lines. Core makes them in the background,
     /// so a new photo gets one soon.
     thumbnail: Option<&'static str>,
+    /// Changes each time core makes the thumbnail again, such as when a
+    /// newer worker makes a better one. Browsers keep a thumbnail for a
+    /// year, so the web app puts this in its address with the hash.
+    thumbnail_version: Option<String>,
     /// For files: which of [`TYPES`] it is, such as "photos", or null for
     /// none. The web app shows its icon by this.
     #[serde(rename = "type")]
@@ -213,16 +217,16 @@ impl ItemView {
             (None, None) => None,
         };
         let preview_partial = document.is_some_and(|document| document.partial);
-        let found = blob
-            .and_then(|blob| thumbnails.find(blob.hash))
-            .map(|thumbnail| thumbnail.kind);
-        let file_type = blob.and_then(|_| item_type(&item.name, found));
-        let thumbnail = found.and_then(|kind| match kind {
+        let found = blob.and_then(|blob| thumbnails.find(blob.hash));
+        let file_type =
+            blob.and_then(|_| item_type(&item.name, found.as_ref().map(|found| found.kind)));
+        let thumbnail = found.as_ref().and_then(|found| match found.kind {
             ThumbnailKind::Picture => Some("picture"),
             // A song or a video that happens to be text, such as a
             // placeholder, would look broken as a page of text.
             ThumbnailKind::Text => text_kind(file_type).then_some("text"),
         });
+        let thumbnail_version = thumbnail.and(found.as_ref()).map(|found| found.version());
         Self {
             id: item.id,
             parent: item.parent,
@@ -234,6 +238,7 @@ impl ItemView {
             preview,
             preview_partial,
             thumbnail,
+            thumbnail_version,
             file_type,
             created_at: item.created_at,
             modified_at: item.modified_at,
@@ -1142,6 +1147,14 @@ pub(crate) const TYPES: &[(&str, &[&str])] = &[
             "cdr",
             "eps",
             "ora",
+            // Embroidery patterns: Brother, Janome, Husqvarna Viking, and
+            // Tajima.
+            "pes",
+            "pec",
+            "jef",
+            "vp3",
+            "hus",
+            "dst",
         ],
     ),
 ];
@@ -2178,6 +2191,7 @@ mod tests {
         assert_eq!(file_type("Helvetica.pfm"), Some("fonts"));
         assert_eq!(file_type("Novel.prc"), Some("ebooks"));
         assert_eq!(file_type("Poster.psd"), Some("designs"));
+        assert_eq!(file_type("Rose.PES"), Some("designs"));
         assert_eq!(file_type("Makefile"), Some("code"));
         assert_eq!(file_type("CMakeLists.txt"), Some("code"));
         assert_eq!(file_type(".bashrc"), Some("code"));

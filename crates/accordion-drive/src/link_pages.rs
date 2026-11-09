@@ -659,9 +659,12 @@ fn picture_html(
     class: &str,
 ) -> String {
     match state.drive.thumbnails.find(hash) {
+        // The hash and the thumbnail's version name this picture, so a
+        // browser fetches a new one when either changes.
         Some(found) if found.kind == ThumbnailKind::Picture => format!(
-            "<img class=\"{class}\" src=\"/s/{token}/thumbnail/{}\" alt=\"\" loading=\"lazy\">",
-            item.id
+            "<img class=\"{class}\" src=\"/s/{token}/thumbnail/{}?v={hash}-{}\" alt=\"\" loading=\"lazy\">",
+            item.id,
+            found.version()
         ),
         _ => String::new(),
     }
