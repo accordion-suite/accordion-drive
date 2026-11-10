@@ -651,6 +651,15 @@ fn preview_html(
         }
         Some(Preview::Video(_)) => video(),
         Some(Preview::Audio(_)) => sound(),
+        // A font's sample text, as its thumbnail shows it.
+        Some(Preview::Font(_)) => {
+            let picture = picture_html(state, token, item, hash, "preview");
+            if picture.is_empty() {
+                icon_html(item, "large")
+            } else {
+                picture
+            }
+        }
         Some(Preview::Pdf) => format!(
             "{}<p><a href=\"{source}\">Open the PDF</a></p>",
             picture_html(state, token, item, hash, "preview")

@@ -1837,3 +1837,47 @@ async fn shows_an_e_books_details_in_the_viewer_and_on_its_link() {
     );
     assert!(!page.contains("<script>"), "{page}");
 }
+
+#[tokio::test]
+async fn sends_fonts_for_the_web_app_to_draw() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let font = b"wOF2\0\x01\0\0 not a whole font".to_vec();
+    for (name, preview, content_type) in [
+        ("Inter.woff2", json!("font"), Some("font/woff2")),
+        ("Sans.ttf", json!("font"), Some("font/ttf")),
+        // Browsers don't draw collections, so core makes a picture instead.
+        ("Fonts.ttc", json!(null), None),
+    ] {
+        let uploaded = server
+            .send(
+                "PUT",
+                &format!("/api/drive/items/{top}/children/{name}"),
+                &[("authorization", &alex.bearer)],
+                font.clone(),
+            )
+            .await
+            .json();
+        assert_eq!(uploaded["preview"], preview, "{name}");
+        assert_eq!(uploaded["type"], json!("fonts"), "{name}");
+        let id = uploaded["id"].as_str().unwrap();
+        let reply = server
+            .api(alex, "GET", &format!("/items/{id}/preview"), None)
+            .await;
+        match content_type {
+            Some(content_type) => {
+                assert_eq!(reply.status, StatusCode::OK, "{name}");
+                assert_eq!(reply.headers["content-type"], content_type);
+                assert_eq!(
+                    reply.headers["content-security-policy"],
+                    "sandbox; frame-ancestors 'self'"
+                );
+            }
+            None => assert_eq!(reply.status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{name}"),
+        }
+    }
+}

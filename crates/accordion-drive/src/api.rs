@@ -130,8 +130,8 @@ pub(crate) struct ItemView {
     version: Option<VersionId>,
     size: Option<u64>,
     sha256: Option<String>,
-    /// For files the browser can show itself: "image", "pdf", "video", or
-    /// "audio", or "document" for an Office document that core has made a
+    /// For files the browser can show itself: "image", "pdf", "video",
+    /// "audio", or "font", or "document" for an Office document that core has made a
     /// PDF of. The web app opens these from `/items/{id}/preview`.
     /// "convert" is a video waiting for core to make one the browser plays,
     /// which `/items/{id}/convert` asks for. Its preview is the file as it
@@ -228,6 +228,7 @@ impl ItemView {
             (Some(Preview::Pdf), _) => Some("pdf"),
             (Some(Preview::Video(_)), _) => Some("video"),
             (Some(Preview::Audio(_)), _) => Some("audio"),
+            (Some(Preview::Font(_)), _) => Some("font"),
             (None, Some(_)) => Some("document"),
             // A picture the browser can't show, such as a HEIC, which core
             // has made a large WebP of.
@@ -1532,7 +1533,8 @@ pub(crate) async fn preview_response(
         Some(
             Preview::Image(content_type)
             | Preview::Video(content_type)
-            | Preview::Audio(content_type),
+            | Preview::Audio(content_type)
+            | Preview::Font(content_type),
         ) => (content_type, "sandbox; frame-ancestors 'self'"),
         // Browsers show PDFs in their own viewers, which keep a PDF's
         // scripts away from the page around it. Some of those viewers
@@ -1986,6 +1988,8 @@ pub(crate) enum Preview {
     Video(&'static str),
     /// With its type, such as "audio/mpeg".
     Audio(&'static str),
+    /// A font the browser draws, with its type, such as "font/woff2".
+    Font(&'static str),
 }
 
 /// Whether a file of this type can show as text: a document, a
@@ -2030,6 +2034,11 @@ pub(crate) fn preview(name: &str) -> Option<Preview> {
         "ogg" | "oga" | "opus" => return Some(Preview::Audio("audio/ogg")),
         "wav" => return Some(Preview::Audio("audio/wav")),
         "flac" => return Some(Preview::Audio("audio/flac")),
+        // The web app draws sample text in the font itself.
+        "ttf" => return Some(Preview::Font("font/ttf")),
+        "otf" => return Some(Preview::Font("font/otf")),
+        "woff" => return Some(Preview::Font("font/woff")),
+        "woff2" => return Some(Preview::Font("font/woff2")),
         _ => return None,
     };
     Some(Preview::Image(image))
@@ -2325,5 +2334,12 @@ mod tests {
             Some(Preview::Image("image/x-icon"))
         ));
         assert!(preview("drawing.svg").is_none());
+        assert!(matches!(
+            preview("Inter.WOFF2"),
+            Some(Preview::Font("font/woff2"))
+        ));
+        // Browsers don't draw collections or Type 1 fonts.
+        assert!(preview("Fonts.ttc").is_none());
+        assert!(preview("Times.pfb").is_none());
     }
 }
