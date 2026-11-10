@@ -277,3 +277,41 @@ footer {
   font-size: 14px;
   text-align: center;
 }
+
+/* An e-book's details, under its cover. */
+.book-title {
+  margin: 16px 0 0;
+  font-size: 20px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.book .facts {
+  margin: 0 0 12px;
+}
+
+.book p {
+  overflow-wrap: anywhere;
+}
+
+.book summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.contents {
+  margin: 8px 0 16px;
+  padding: 0;
+  list-style: none;
+}
+
+.contents li {
+  padding: 2px 0;
+  overflow-wrap: anywhere;
+}
+
+.contents .depth-1 { padding-left: 20px; }
+.contents .depth-2 { padding-left: 40px; }
+.contents .depth-3 { padding-left: 60px; }
+.contents .depth-4 { padding-left: 80px; }
+.contents .depth-5 { padding-left: 100px; }

@@ -1741,3 +1741,99 @@ async fn plays_video_core_converts_when_someone_opens_it() {
         .await;
     assert_eq!(&reply.body[..4], b"RIFF");
 }
+
+#[tokio::test]
+async fn shows_an_e_books_details_in_the_viewer_and_on_its_link() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let book = r#"<?xml version="1.0" encoding="utf-8"?>
+<FictionBook><description><title-info>
+  <author><first-name>Ivan</first-name><last-name>Turgenev</last-name></author>
+  <author><nickname>A &lt;b&gt;translator&lt;/b&gt;</nickname></author>
+  <book-title>Fathers &amp; Sons</book-title>
+  <annotation><p>A novel of 1862.</p><p>&lt;script&gt;alert(1)&lt;/script&gt;</p></annotation>
+</title-info></description>
+<body><section><title><p>Chapter I</p></title><section><title><p>Part one</p></title></section></section></body>
+</FictionBook>"#;
+    let uploaded = server
+        .send(
+            "PUT",
+            &format!("/api/drive/items/{top}/children/Fathers.fb2"),
+            &[("authorization", &alex.bearer)],
+            book.to_owned(),
+        )
+        .await
+        .json();
+    let id = uploaded["id"].as_str().unwrap().to_owned();
+
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let worker = tokio::spawn(server.thumbnails.clone().run(async {
+        let _ = stopped.await;
+    }));
+    let item = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let item = server
+                .api(alex, "GET", &format!("/items/{id}"), None)
+                .await
+                .json();
+            if item["preview"] == json!("book") {
+                break item;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the book's preview should be its details");
+    stop.send(()).unwrap();
+    worker.await.unwrap();
+    assert_eq!(item["type"], json!("ebooks"));
+
+    let reply = server
+        .api(alex, "GET", &format!("/items/{id}/preview"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.headers["content-type"], "application/json");
+    assert_eq!(
+        reply.json(),
+        json!({
+            "title": "Fathers & Sons",
+            "authors": ["Ivan Turgenev", "A <b>translator</b>"],
+            "description": "A novel of 1862.\n<script>alert(1)</script>",
+            "contents": [
+                { "title": "Chapter I", "depth": 0 },
+                { "title": "Part one", "depth": 1 },
+            ],
+        })
+    );
+
+    // Its link's page shows the same, as text.
+    let reply = server
+        .api(
+            alex,
+            "POST",
+            &format!("/items/{id}/links"),
+            Some(json!({ "expires": "7d" })),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.text());
+    let url = reply.json()["url"].as_str().unwrap().to_owned();
+    let path = &url[url.find("/s/").unwrap()..];
+    let page = server.link("GET", path, &[], "").await.text();
+    assert!(
+        page.contains("<p class=\"book-title\">Fathers &amp; Sons</p>"),
+        "{page}"
+    );
+    assert!(
+        page.contains("By Ivan Turgenev and A &lt;b&gt;translator&lt;/b&gt;"),
+        "{page}"
+    );
+    assert!(
+        page.contains("<li class=\"depth-1\">Part one</li>"),
+        "{page}"
+    );
+    assert!(!page.contains("<script>"), "{page}");
+}

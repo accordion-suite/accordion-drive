@@ -135,7 +135,9 @@ pub(crate) struct ItemView {
     /// PDF of. The web app opens these from `/items/{id}/preview`.
     /// "convert" is a video waiting for core to make one the browser plays,
     /// which `/items/{id}/convert` asks for. Its preview is the file as it
-    /// is, if the browser may play it.
+    /// is, if the browser may play it. "book" is an e-book, whose preview is
+    /// its details as JSON: its `title`, `authors`, `description`, and
+    /// `contents`, each entry with a `title` and a `depth`.
     preview: Option<&'static str>,
     /// For a document: whether its preview stops at its first pages, so the
     /// document may go on past them.
@@ -215,10 +217,13 @@ impl ItemView {
         // A video core has repackaged or converted, or will.
         let video = blob.is_some_and(|blob| thumbnails.video(blob.hash).is_some());
         let waiting = blob.is_some_and(|blob| thumbnails.video_waiting(blob.hash));
+        // An e-book's cover and details, which core read.
+        let book = blob.is_some_and(|blob| thumbnails.book(blob.hash).is_some());
         let preview = match (blob.and(preview(&item.name)), &document) {
             _ if sound => Some("audio"),
             _ if video => Some("video"),
             _ if waiting => Some("convert"),
+            _ if book => Some("book"),
             (Some(Preview::Image(_)), _) => Some("image"),
             (Some(Preview::Pdf), _) => Some("pdf"),
             (Some(Preview::Video(_)), _) => Some("video"),
@@ -1145,8 +1150,8 @@ pub(crate) const TYPES: &[(&str, &[&str])] = &[
     (
         "ebooks",
         &[
-            "epub", "mobi", "azw", "azw3", "kf8", "kfx", "prc", "fb2", "lit", "lrf", "ibooks",
-            "djvu", "djv", "cbz", "cbr", "cb7",
+            "epub", "kepub", "mobi", "azw", "azw3", "kf8", "kfx", "prc", "fb2", "lit", "lrf",
+            "ibooks", "djvu", "djv", "cbz", "cbr", "cb7",
         ],
     ),
     (
@@ -1511,6 +1516,17 @@ pub(crate) async fn preview_response(
             "mp4"
         };
         return converted(request, item, blob.hash, &video, extension, content_type).await;
+    }
+    if let Some(details) = state.thumbnails.book(blob.hash) {
+        return converted(
+            request,
+            item,
+            blob.hash,
+            &details,
+            "json",
+            "application/json",
+        )
+        .await;
     }
     let (content_type, policy) = match preview(&item.name) {
         Some(

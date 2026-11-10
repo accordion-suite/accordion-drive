@@ -636,6 +636,15 @@ fn preview_html(
     if state.drive.thumbnails.video(hash).is_some() {
         return video();
     }
+    // An e-book's cover, then its details.
+    if let Some(details) = state.drive.thumbnails.book(hash)
+        && let Some(details) = book_html(&details)
+    {
+        return format!(
+            "{}{details}",
+            picture_html(state, token, item, hash, "preview")
+        );
+    }
     match api::preview(&item.name) {
         Some(Preview::Image(_)) => {
             format!("<img class=\"preview\" src=\"{source}\" alt=\"{name}\">")
@@ -658,6 +667,53 @@ fn preview_html(
                 picture
             }
         }
+    }
+}
+
+/// An e-book's title, authors, description, and table of contents, from
+/// the details core read, as text.
+fn book_html(details: &std::path::Path) -> Option<String> {
+    let details: serde_json::Value = serde_json::from_slice(&std::fs::read(details).ok()?).ok()?;
+    let text = |value: &serde_json::Value| value.as_str().map(escape);
+    let mut html = String::from("<div class=\"book\">");
+    if let Some(title) = text(&details["title"]) {
+        let _ = write!(html, "<p class=\"book-title\">{title}</p>");
+    }
+    let authors: Vec<String> = details["authors"]
+        .as_array()
+        .map(|authors| authors.iter().filter_map(text).collect())
+        .unwrap_or_default();
+    if !authors.is_empty() {
+        let _ = write!(html, "<p class=\"facts\">By {}</p>", series(&authors));
+    }
+    if let Some(description) = text(&details["description"]) {
+        for paragraph in description.lines() {
+            let _ = write!(html, "<p>{paragraph}</p>");
+        }
+    }
+    let contents = details["contents"].as_array().cloned().unwrap_or_default();
+    if !contents.is_empty() {
+        html.push_str("<details><summary>Contents</summary><ul class=\"contents\">");
+        for entry in &contents {
+            let Some(title) = text(&entry["title"]) else {
+                continue;
+            };
+            let depth = entry["depth"].as_u64().unwrap_or(0).min(5);
+            let _ = write!(html, "<li class=\"depth-{depth}\">{title}</li>");
+        }
+        html.push_str("</ul></details>");
+    }
+    html.push_str("</div>");
+    Some(html)
+}
+
+/// `names` as a list in a sentence, with a serial comma.
+fn series(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [one, two] => format!("{one} and {two}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
     }
 }
 
