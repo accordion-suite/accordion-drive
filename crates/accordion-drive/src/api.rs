@@ -53,6 +53,7 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/items/{id}/content", get(download).put(write_version))
         .route("/items/{id}/preview", get(preview_file))
         .route("/items/{id}/preview/{name}", get(preview_named))
+        .route("/items/{id}/convert", post(convert_video))
         .route("/items/{id}/thumbnail", get(thumbnail))
         .route("/items/{id}/restore", post(restore))
         .route("/items/{id}/star", put(star).delete(unstar))
@@ -132,6 +133,9 @@ pub(crate) struct ItemView {
     /// For files the browser can show itself: "image", "pdf", "video", or
     /// "audio", or "document" for an Office document that core has made a
     /// PDF of. The web app opens these from `/items/{id}/preview`.
+    /// "convert" is a video waiting for core to make one the browser plays,
+    /// which `/items/{id}/convert` asks for. Its preview is the file as it
+    /// is, if the browser may play it.
     preview: Option<&'static str>,
     /// For a document: whether its preview stops at its first pages, so the
     /// document may go on past them.
@@ -208,8 +212,13 @@ impl ItemView {
         // A sound the browser can't play, such as a Windows Media song,
         // which core has converted to AAC.
         let sound = blob.is_some_and(|blob| thumbnails.sound(blob.hash).is_some());
+        // A video core has repackaged or converted, or will.
+        let video = blob.is_some_and(|blob| thumbnails.video(blob.hash).is_some());
+        let waiting = blob.is_some_and(|blob| thumbnails.video_waiting(blob.hash));
         let preview = match (blob.and(preview(&item.name)), &document) {
             _ if sound => Some("audio"),
+            _ if video => Some("video"),
+            _ if waiting => Some("convert"),
             (Some(Preview::Image(_)), _) => Some("image"),
             (Some(Preview::Pdf), _) => Some("pdf"),
             (Some(Preview::Video(_)), _) => Some("video"),
@@ -1460,6 +1469,22 @@ async fn preview_file(
     preview_response(&state, &request, &item).await
 }
 
+/// `POST /items/{id}/convert`: asks core to make the preview of a video
+/// waiting for one now, since someone's opened it. Says whether it will:
+/// not if the admin turned conversion off.
+async fn convert_video(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path(id): Path<ItemId>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (item, _) = state.reach(me.user.id, id, Access::Viewer).await?;
+    let ItemKind::File { blob, .. } = item.kind else {
+        return Err(storage::Error::NotAFile.into());
+    };
+    let converting = state.thumbnails.want(blob.hash).await?;
+    Ok(Json(serde_json::json!({ "converting": converting })))
+}
+
 /// A file's preview, for the web app and for link pages: the file as a
 /// type the browser shows itself, or an Office document's PDF preview.
 pub(crate) async fn preview_response(
@@ -1474,6 +1499,18 @@ pub(crate) async fn preview_response(
     // whose name says it can, such as Apple Lossless in an M4A.
     if let Some(sound) = state.thumbnails.sound(blob.hash) {
         return converted(request, item, blob.hash, &sound, "m4a", "audio/mp4").await;
+    }
+    if let Some((video, content_type)) = state.thumbnails.video(blob.hash) {
+        // So the cache limit removes videos nobody's watched lately first.
+        if let Err(err) = state.thumbnails.watched(blob.hash).await {
+            tracing::warn!(%err, "couldn't note that a video was watched");
+        }
+        let extension = if content_type == "video/webm" {
+            "webm"
+        } else {
+            "mp4"
+        };
+        return converted(request, item, blob.hash, &video, extension, content_type).await;
     }
     let (content_type, policy) = match preview(&item.name) {
         Some(

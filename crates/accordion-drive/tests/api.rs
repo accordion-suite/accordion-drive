@@ -1641,3 +1641,103 @@ async fn calls_a_file_audio_once_core_finds_sound_in_it() {
     worker.await.unwrap();
     assert_eq!(item["type"], json!("audio"));
 }
+
+/// Makes a two-second video with ffmpeg, outside the sandbox.
+fn video(dir: &std::path::Path, name: &str, options: &[&str]) -> Vec<u8> {
+    let path = dir.join(name);
+    let made = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-f", "lavfi"])
+        .args(["-i", "testsrc2=size=320x240:rate=30:duration=2"])
+        .args(options)
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    std::fs::read(path).unwrap()
+}
+
+#[tokio::test]
+async fn plays_video_core_converts_when_someone_opens_it() {
+    use accordion_core::thumbnails::{PreviewSettings, VideoConversion};
+    let server = start().await;
+    server
+        .thumbnails
+        .set_settings(PreviewSettings {
+            convert_videos: Some(VideoConversion::Opened),
+            space_percent: 10,
+        })
+        .await
+        .unwrap();
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let dir = tempfile::tempdir().unwrap();
+    let uploaded = server
+        .send(
+            "PUT",
+            &format!("/api/drive/items/{top}/children/Old.avi"),
+            &[("authorization", &alex.bearer)],
+            video(dir.path(), "old.avi", &["-c:v", "mpeg4"]),
+        )
+        .await
+        .json();
+    let id = uploaded["id"].as_str().unwrap().to_owned();
+
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let worker = tokio::spawn(server.thumbnails.clone().run(async {
+        let _ = stopped.await;
+    }));
+    let preview_is = |wanted: &'static str| {
+        let id = id.clone();
+        let server = &server;
+        async move {
+            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                loop {
+                    let item = server
+                        .api(alex, "GET", &format!("/items/{id}"), None)
+                        .await
+                        .json();
+                    if item["preview"] == json!(wanted) {
+                        break item;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("the video's preview should become {wanted}"))
+        }
+    };
+    let item = preview_is("convert").await;
+    assert_eq!(item["type"], json!("videos"));
+    // Browsers can't play an AVI, so there's nothing to play yet.
+    let reply = server
+        .api(alex, "GET", &format!("/items/{id}/preview"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    let reply = server
+        .api(alex, "POST", &format!("/items/{id}/convert"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json(), json!({ "converting": true }));
+    preview_is("video").await;
+    stop.send(()).unwrap();
+    worker.await.unwrap();
+
+    let reply = server
+        .api(alex, "GET", &format!("/items/{id}/preview"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.headers["content-type"], "video/mp4");
+    assert_eq!(
+        reply.headers["content-disposition"],
+        "inline; filename=\"Old.mp4\"; filename*=UTF-8''Old.mp4"
+    );
+    // The download is still the AVI.
+    let reply = server
+        .api(alex, "GET", &format!("/items/{id}/content"), None)
+        .await;
+    assert_eq!(&reply.body[..4], b"RIFF");
+}

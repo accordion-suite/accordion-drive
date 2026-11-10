@@ -223,6 +223,11 @@ fn cases() -> Vec<Case> {
             "/items/{}/preview",
             f.photo
         )),
+        // Anyone who can watch a video can ask for it to be converted.
+        case!("POST", "/items/{id}/convert", Viewer, |f| format!(
+            "/items/{}/convert",
+            f.photo
+        )),
         case!("GET", "/items/{id}/thumbnail", Viewer, |f| format!(
             "/items/{}/thumbnail",
             f.photo

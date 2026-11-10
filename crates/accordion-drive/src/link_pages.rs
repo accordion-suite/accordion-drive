@@ -626,19 +626,21 @@ fn preview_html(
             picture_html(state, token, item, hash, "preview")
         )
     };
-    // Sound core converted, for a file the browser can't play.
+    let video = || {
+        format!("<video class=\"preview\" controls preload=\"metadata\" src=\"{source}\"></video>")
+    };
+    // Sound or video core converted, for a file the browser can't play.
     if state.drive.thumbnails.sound(hash).is_some() {
         return sound();
+    }
+    if state.drive.thumbnails.video(hash).is_some() {
+        return video();
     }
     match api::preview(&item.name) {
         Some(Preview::Image(_)) => {
             format!("<img class=\"preview\" src=\"{source}\" alt=\"{name}\">")
         }
-        Some(Preview::Video(_)) => {
-            format!(
-                "<video class=\"preview\" controls preload=\"metadata\" src=\"{source}\"></video>"
-            )
-        }
+        Some(Preview::Video(_)) => video(),
         Some(Preview::Audio(_)) => sound(),
         Some(Preview::Pdf) => format!(
             "{}<p><a href=\"{source}\">Open the PDF</a></p>",
