@@ -1303,6 +1303,87 @@ async fn previews_office_documents_once_core_makes_them() {
 }
 
 #[tokio::test]
+async fn plays_sound_core_converts_for_the_browser() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // A Windows Media song, made with ffmpeg outside the sandbox.
+    let dir = tempfile::tempdir().unwrap();
+    let song = dir.path().join("song.wma");
+    let made = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-f", "lavfi", "-i", "sine=duration=2"])
+        .args(["-c:a", "wmav2"])
+        .arg(&song)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let song = server
+        .send(
+            "PUT",
+            &format!("/api/drive/items/{top}/children/Song.wma"),
+            &[("authorization", &alex.bearer)],
+            std::fs::read(&song).unwrap(),
+        )
+        .await
+        .json();
+    let id = song["id"].as_str().unwrap().to_owned();
+    // Browsers don't play Windows Media, so there's nothing yet.
+    assert_eq!(song["preview"], json!(null));
+
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let worker = tokio::spawn(server.thumbnails.clone().run(async {
+        let _ = stopped.await;
+    }));
+    let item = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let item = server
+                .api(alex, "GET", &format!("/items/{id}"), None)
+                .await
+                .json();
+            if item["preview"] == json!("audio") {
+                break item;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("core should convert the song");
+    stop.send(()).unwrap();
+    worker.await.unwrap();
+    assert_eq!(item["type"], json!("audio"));
+
+    let reply = server
+        .api(alex, "GET", &format!("/items/{id}/preview"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.headers["content-type"], "audio/mp4");
+    assert_eq!(
+        reply.headers["content-disposition"],
+        "inline; filename=\"Song.m4a\"; filename*=UTF-8''Song.m4a"
+    );
+    assert_eq!(&reply.body[4..8], b"ftyp");
+    // Players ask for parts as they seek.
+    let reply = server
+        .send(
+            "GET",
+            &format!("/api/drive/items/{id}/preview"),
+            &[("authorization", &alex.bearer), ("range", "bytes=4-7")],
+            Vec::new(),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(&reply.body[..], b"ftyp");
+    // The download is still the song itself.
+    let reply = server
+        .api(alex, "GET", &format!("/items/{id}/content"), None)
+        .await;
+    assert!(reply.body.starts_with(b"\x30\x26\xb2\x75"));
+}
+
+#[tokio::test]
 async fn colors_describes_and_sizes_folders() {
     let server = start().await;
     let alex = &server.alex;
@@ -1505,4 +1586,58 @@ async fn the_text_editor_saves_only_over_what_it_opened() {
         .api(alex, "GET", &format!("/items/{id}/content"), None)
         .await;
     assert_eq!(content.text(), "# Kim");
+}
+
+#[tokio::test]
+async fn calls_a_file_audio_once_core_finds_sound_in_it() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Ensoniq PARIS audio, made with SoX. Most `.paf` files are family
+    // trees, so the name alone doesn't say it's sound.
+    let dir = tempfile::tempdir().unwrap();
+    let recording = dir.path().join("recording.paf");
+    let made = std::process::Command::new("sox")
+        .args(["-V1", "-n", "-c", "1"])
+        .arg(&recording)
+        .args(["synth", "2", "sine", "440"])
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let recording = server
+        .send(
+            "PUT",
+            &format!("/api/drive/items/{top}/children/Recording.paf"),
+            &[("authorization", &alex.bearer)],
+            std::fs::read(&recording).unwrap(),
+        )
+        .await
+        .json();
+    let id = recording["id"].as_str().unwrap().to_owned();
+    assert_eq!(recording["type"], json!(null));
+
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let worker = tokio::spawn(server.thumbnails.clone().run(async {
+        let _ = stopped.await;
+    }));
+    let item = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let item = server
+                .api(alex, "GET", &format!("/items/{id}"), None)
+                .await
+                .json();
+            if item["preview"] == json!("audio") {
+                break item;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("core should convert the recording");
+    stop.send(()).unwrap();
+    worker.await.unwrap();
+    assert_eq!(item["type"], json!("audio"));
 }

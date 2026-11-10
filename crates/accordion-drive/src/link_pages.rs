@@ -619,6 +619,17 @@ fn preview_html(
 ) -> String {
     let source = format!("/s/{token}/preview/{}", item.id);
     let name = escape(&item.name);
+    // A song's cover art, if it has some, then its sound.
+    let sound = || {
+        format!(
+            "{}<audio controls preload=\"metadata\" src=\"{source}\"></audio>",
+            picture_html(state, token, item, hash, "preview")
+        )
+    };
+    // Sound core converted, for a file the browser can't play.
+    if state.drive.thumbnails.sound(hash).is_some() {
+        return sound();
+    }
     match api::preview(&item.name) {
         Some(Preview::Image(_)) => {
             format!("<img class=\"preview\" src=\"{source}\" alt=\"{name}\">")
@@ -628,9 +639,7 @@ fn preview_html(
                 "<video class=\"preview\" controls preload=\"metadata\" src=\"{source}\"></video>"
             )
         }
-        Some(Preview::Audio(_)) => {
-            format!("<audio controls preload=\"metadata\" src=\"{source}\"></audio>")
-        }
+        Some(Preview::Audio(_)) => sound(),
         Some(Preview::Pdf) => format!(
             "{}<p><a href=\"{source}\">Open the PDF</a></p>",
             picture_html(state, token, item, hash, "preview")

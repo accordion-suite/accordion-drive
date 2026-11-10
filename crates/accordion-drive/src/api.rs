@@ -205,7 +205,11 @@ impl ItemView {
         };
         let document = blob.and_then(|blob| thumbnails.preview(blob.hash));
         let picture = blob.is_some_and(|blob| thumbnails.picture(blob.hash).is_some());
+        // A sound the browser can't play, such as a Windows Media song,
+        // which core has converted to AAC.
+        let sound = blob.is_some_and(|blob| thumbnails.sound(blob.hash).is_some());
         let preview = match (blob.and(preview(&item.name)), &document) {
+            _ if sound => Some("audio"),
             (Some(Preview::Image(_)), _) => Some("image"),
             (Some(Preview::Pdf), _) => Some("pdf"),
             (Some(Preview::Video(_)), _) => Some("video"),
@@ -218,8 +222,15 @@ impl ItemView {
         };
         let preview_partial = document.is_some_and(|document| document.partial);
         let found = blob.and_then(|blob| thumbnails.find(blob.hash));
-        let file_type =
-            blob.and_then(|_| item_type(&item.name, found.as_ref().map(|found| found.kind)));
+        let file_type = match blob
+            .and_then(|_| item_type(&item.name, found.as_ref().map(|found| found.kind)))
+        {
+            known @ Some("audio" | "videos") => known,
+            // Core found sound in it, such as Ensoniq PARIS audio in a
+            // `.paf`, which is mostly family trees.
+            _ if sound => Some("audio"),
+            other => other,
+        };
         let thumbnail = found.as_ref().and_then(|found| match found.kind {
             ThumbnailKind::Picture => Some("picture"),
             // A song or a video that happens to be text, such as a
@@ -1012,9 +1023,12 @@ pub(crate) const TYPES: &[(&str, &[&str])] = &[
             "caf", "mka", "ra", "w64", "mid", "midi", "kar", "mod", "xm", "s3m", "it", "dsf",
             "dff",
             // Older formats, from Amiga, Atari, classic Mac, Sound Blaster,
-            // telephone, and speech research audio.
-            "8svx", "amb", "avr", "cdda", "cvsd", "cvu", "dvms", "fssd", "gsrt", "hcom", "ircam",
-            "maud", "nist", "pvf", "sndr", "sndt", "sph", "txw", "voc",
+            // samplers, telephone, and speech research audio. `.paf`, `.ima`,
+            // and `.wve` are mostly other programs' files, so they're audio
+            // only when core finds sound in them.
+            "8svx", "amb", "avr", "cdda", "cvs", "cvsd", "cvu", "dvms", "fap", "fssd", "gsrt",
+            "hcom", "htk", "ircam", "maud", "nist", "pvf", "sd2", "smp", "sndr", "sndt", "sou",
+            "sph", "txw", "vms", "voc", "vox",
         ],
     ),
     (
@@ -1433,8 +1447,9 @@ async fn download(
 }
 
 /// `GET /items/{id}/preview`: the file as a type the browser shows itself,
-/// for the kinds of file that `preview` allows, or an Office document's
-/// preview, a PDF of its first pages, once core has made one.
+/// for the kinds of file that `preview` allows, or a preview core has made
+/// of it: an Office document's PDF of its first pages, a large picture, or
+/// sound converted to AAC.
 async fn preview_file(
     State(state): State<DriveState>,
     Authenticated(me): Authenticated,
@@ -1455,6 +1470,11 @@ pub(crate) async fn preview_response(
     let ItemKind::File { blob, .. } = item.kind else {
         return Err(storage::Error::NotAFile.into());
     };
+    // Core converts only sound the browser can't play, even in a file
+    // whose name says it can, such as Apple Lossless in an M4A.
+    if let Some(sound) = state.thumbnails.sound(blob.hash) {
+        return converted(request, item, blob.hash, &sound, "m4a", "audio/mp4").await;
+    }
     let (content_type, policy) = match preview(&item.name) {
         Some(
             Preview::Image(content_type)
