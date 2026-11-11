@@ -1199,6 +1199,70 @@ async fn sends_thumbnails_once_core_makes_them() {
 }
 
 #[tokio::test]
+async fn sends_a_files_facts_once_core_reads_them() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("beach.jpg");
+    let made = std::process::Command::new("vips")
+        .args(["xyz", path.to_str().unwrap(), "1600", "1200"])
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let photo = server
+        .send(
+            "PUT",
+            &format!("/api/drive/items/{top}/children/beach.jpg"),
+            &[("authorization", &alex.bearer)],
+            std::fs::read(&path).unwrap(),
+        )
+        .await
+        .json();
+    let id = photo["id"].as_str().unwrap().to_owned();
+    let nothing = json!({
+        "width": null, "height": null, "seconds": null, "pages": null, "more_pages": false
+    });
+
+    // Core hasn't read it yet.
+    let reply = server
+        .api(alex, "GET", &format!("/items/{id}/facts"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.json(), nothing);
+
+    let hash =
+        accordion_core::storage::ContentHash::from_hex(photo["sha256"].as_str().unwrap()).unwrap();
+    assert!(server.thumbnails.make_now(hash).await.unwrap());
+    server.thumbnails.read_facts_now(hash).await.unwrap();
+    let facts = server
+        .api(alex, "GET", &format!("/items/{id}/facts"), None)
+        .await
+        .json();
+    assert_eq!(
+        facts,
+        json!({
+            "width": 1600, "height": 1200, "seconds": null, "pages": null, "more_pages": false
+        })
+    );
+
+    // A folder has none.
+    let folder = server
+        .api(alex, "GET", &format!("/items/{top}/facts"), None)
+        .await;
+    assert_eq!(folder.json(), nothing);
+
+    // Nobody else reaches it.
+    let reply = server
+        .api(&server.sam, "GET", &format!("/items/{id}/facts"), None)
+        .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn previews_office_documents_once_core_makes_them() {
     let server = start().await;
     let alex = &server.alex;

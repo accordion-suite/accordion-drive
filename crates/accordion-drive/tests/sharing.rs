@@ -232,6 +232,10 @@ fn cases() -> Vec<Case> {
             "/items/{}/thumbnail",
             f.photo
         )),
+        case!("GET", "/items/{id}/facts", Viewer, |f| format!(
+            "/items/{}/facts",
+            f.photo
+        )),
         case!("POST", "/items/{id}/restore", OwnerAlone, |f| format!(
             "/items/{}/restore",
             f.trashed

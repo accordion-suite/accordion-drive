@@ -17,7 +17,7 @@ use accordion_core::storage::{
     self, Access, Blob, Found, Item, ItemKind, Only, Owner, Place, Search, Upload, Usage, Version,
 };
 use accordion_core::texts::Words;
-use accordion_core::thumbnails::{ThumbnailKind, Thumbnails};
+use accordion_core::thumbnails::{Facts, ThumbnailKind, Thumbnails};
 use accordion_module::auth::actor;
 use accordion_module::{ApiError, Authenticated};
 use accordion_types::{ItemId, UploadId, UserId, VersionId};
@@ -55,6 +55,7 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/items/{id}/preview/{name}", get(preview_named))
         .route("/items/{id}/convert", post(convert_video))
         .route("/items/{id}/thumbnail", get(thumbnail))
+        .route("/items/{id}/facts", get(facts))
         .route("/items/{id}/restore", post(restore))
         .route("/items/{id}/star", put(star).delete(unstar))
         .route("/items/{id}/color", put(set_color).delete(clear_color))
@@ -1655,6 +1656,50 @@ async fn thumbnail(
         HeaderValue::from_static("private, max-age=31536000, immutable"),
     );
     Ok((headers, thumbnail).into_response())
+}
+
+/// What the details panel shows about a file's contents. Each is null for
+/// a folder, a kind of file without it, or a file the server hasn't read
+/// yet.
+#[derive(Default, Serialize)]
+struct FactsView {
+    /// A picture's or a video's size as it's shown, in pixels.
+    width: Option<u32>,
+    height: Option<u32>,
+    /// How long a video or a sound lasts.
+    seconds: Option<f64>,
+    /// How many pages a document has, or a presentation's slides.
+    pages: Option<u32>,
+    /// Whether the document goes on past `pages`, which is then as far as
+    /// its preview goes.
+    more_pages: bool,
+}
+
+impl From<Facts> for FactsView {
+    fn from(facts: Facts) -> Self {
+        Self {
+            width: facts.width,
+            height: facts.height,
+            seconds: facts.seconds,
+            pages: facts.pages,
+            more_pages: facts.more_pages,
+        }
+    }
+}
+
+/// `GET /items/{id}/facts`: a file's size in pixels, length, and pages,
+/// as the thumbnail worker read them.
+async fn facts(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path(id): Path<ItemId>,
+) -> Result<Json<FactsView>, ApiError> {
+    let (item, _) = state.reach(me.user.id, id, Access::Viewer).await?;
+    let ItemKind::File { blob, .. } = item.kind else {
+        return Ok(Json(FactsView::default()));
+    };
+    let facts = state.thumbnails.facts(blob.hash).await?;
+    Ok(Json(facts.map(FactsView::from).unwrap_or_default()))
 }
 
 #[derive(Deserialize)]
