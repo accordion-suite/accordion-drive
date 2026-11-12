@@ -1136,3 +1136,90 @@ async fn a_file_renamed_here_is_marked_synced_again() {
         );
     }
 }
+
+/// Files on demand whose marking can fail, as Cloud Files' can on a Windows
+/// PC, and that say an item is in sync once it's marked.
+#[derive(Default)]
+struct FlakyMarks {
+    failing: AtomicBool,
+    in_sync: Mutex<BTreeSet<PathBuf>>,
+    marked: Mutex<Vec<PathBuf>>,
+}
+
+impl OnDemand for FlakyMarks {
+    fn place(&self, item: &RemoteItem, at: &Path) -> std::io::Result<()> {
+        if item.is_folder() {
+            fs::create_dir_all(at)
+        } else {
+            Err(std::io::Error::other("this test only adds files here"))
+        }
+    }
+
+    fn synced(&self, _item: &RemoteItem, at: &Path) -> std::io::Result<()> {
+        if self.failing.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("the system said no"));
+        }
+        self.in_sync.lock().unwrap().insert(at.to_owned());
+        self.marked.lock().unwrap().push(at.to_owned());
+        Ok(())
+    }
+
+    fn status(&self, at: &Path) -> Status {
+        if self.in_sync.lock().unwrap().contains(at) {
+            Status::InSync
+        } else {
+            Status::Changed
+        }
+    }
+}
+
+/// Marking happened only as each change synced, so a file whose marking
+/// failed showed as waiting to sync until it changed again. The first pass
+/// after the app starts marks it.
+#[tokio::test]
+async fn an_item_left_unmarked_is_marked_when_the_app_starts() {
+    let server = start().await;
+    let origin = serve(&server).await;
+    let token = server.alex.bearer["Bearer ".len()..].to_owned();
+    let dir = tempfile::tempdir().unwrap();
+    let laptop = device(dir.path(), "Laptop");
+    let marks = Arc::new(FlakyMarks::default());
+    let engine = || {
+        Engine::new(
+            Client::new(&origin, Some(token.clone())).unwrap(),
+            State::open(&laptop.db).unwrap(),
+            laptop.root.clone(),
+            laptop.name.clone(),
+        )
+        .with_on_demand(marks.clone())
+    };
+    let soup = laptop.my_drive().join("soup.md");
+
+    let mut running = engine();
+    running.sync().await.unwrap();
+    write(&soup, "leek");
+    marks.failing.store(true, Ordering::SeqCst);
+    let report = running.sync().await.unwrap();
+    assert!(
+        report
+            .notices
+            .iter()
+            .any(|notice| notice.starts_with("Couldn't mark My Drive/soup.md")),
+        "{:?}",
+        report.notices
+    );
+    marks.failing.store(false, Ordering::SeqCst);
+
+    // Later passes don't look at every item.
+    running.sync().await.unwrap();
+    assert!(!marks.marked.lock().unwrap().contains(&soup));
+    drop(running);
+
+    engine().sync().await.unwrap();
+    assert!(marks.marked.lock().unwrap().contains(&soup));
+
+    // What's marked already isn't marked again.
+    let before = marks.marked.lock().unwrap().len();
+    engine().sync().await.unwrap();
+    assert_eq!(marks.marked.lock().unwrap().len(), before);
+}
