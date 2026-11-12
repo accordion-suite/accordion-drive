@@ -372,6 +372,7 @@ fn cases() -> Vec<Case> {
             f.trashed
         )),
         case!("GET", "/usage", Own, |f| "/usage".into()),
+        case!("GET", "/usage/types", Own, |f| "/usage/types".into()),
         case!("GET", "/retention", Own, |f| "/retention".into()),
         case!("GET", "/recent", Own, |f| "/recent".into()),
         case!("GET", "/starred", Own, |f| "/starred".into()),

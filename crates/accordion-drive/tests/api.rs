@@ -382,6 +382,37 @@ async fn resumes_uploads() {
 }
 
 #[tokio::test]
+async fn says_how_much_space_each_type_takes() {
+    let server = start().await;
+    let alex = &server.alex;
+    let top = server.api(alex, "GET", "/top", None).await.json()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    write(&server, &top, "beach.jpg", "123456").await;
+    write(&server, &top, "beach.jpg", "1234").await;
+    write(&server, &top, "notes.md", "12345").await;
+    write(&server, &top, "README", "12").await;
+    let old = write(&server, &top, "old.png", "1").await;
+    server
+        .api(alex, "DELETE", &format!("/items/{old}"), None)
+        .await;
+
+    // Older versions and the trash count, as they do toward what's used.
+    let types = server.api(alex, "GET", "/usage/types", None).await.json();
+    assert_eq!(
+        types,
+        json!([
+            { "type": "photos", "bytes": 11 },
+            { "type": "documents", "bytes": 5 },
+            { "type": null, "bytes": 2 },
+        ])
+    );
+    let usage = server.api(alex, "GET", "/usage", None).await.json();
+    assert_eq!(usage["used"], 18);
+}
+
+#[tokio::test]
 async fn says_how_long_trash_and_versions_are_kept() {
     let server = start().await;
     let retention = server

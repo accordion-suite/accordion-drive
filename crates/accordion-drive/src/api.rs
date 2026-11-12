@@ -101,6 +101,7 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route("/trash", get(trash).delete(empty_trash))
         .route("/trash/{id}", delete(delete_forever))
         .route("/usage", get(usage))
+        .route("/usage/types", get(usage_by_type))
         .route("/retention", get(retention))
         .route("/recent", get(recent))
         .route("/starred", get(starred))
@@ -1852,6 +1853,38 @@ async fn usage(
     Authenticated(me): Authenticated,
 ) -> Result<Json<UsageView>, ApiError> {
     Ok(Json(state.storage.usage(me.user.id).await?.into()))
+}
+
+#[derive(Serialize)]
+struct TypeUsageView {
+    /// Which of [`TYPES`] the files are, or null for files of no type.
+    #[serde(rename = "type")]
+    file_type: Option<&'static str>,
+    bytes: u64,
+}
+
+/// `GET /usage/types`: how much space each type of file takes, such as
+/// photos, largest first. Like `/usage`, it counts every version and the
+/// trash, so the types add up to what's used.
+async fn usage_by_type(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+) -> Result<Json<Vec<TypeUsageView>>, ApiError> {
+    let mut by_type: Vec<TypeUsageView> = Vec::new();
+    for file in state.storage.space_by_file(me.user.id).await? {
+        let file_type = file_type(&file.name);
+        match by_type.iter_mut().find(|each| each.file_type == file_type) {
+            Some(each) => each.bytes += file.bytes,
+            None => by_type.push(TypeUsageView {
+                file_type,
+                bytes: file.bytes,
+            }),
+        }
+    }
+    // Empty files take no space, so they'd only be a line with nothing in it.
+    by_type.retain(|each| each.bytes > 0);
+    by_type.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.file_type.cmp(&b.file_type)));
+    Ok(Json(by_type))
 }
 
 /// How long the server keeps trash and older versions, which the admin
