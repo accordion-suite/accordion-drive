@@ -939,6 +939,13 @@ async fn searches_inside_files_with_every_filter() {
         ["notes.txt"]
     );
     assert!(names(&search("/search?shared_with=kim").await).is_empty());
+    // The People filter: what Alex shared, and with Sam.
+    assert_eq!(names(&search("/search?owner=shared").await), ["notes.txt"]);
+    assert_eq!(
+        names(&search("/search?owner=person:sam").await),
+        ["notes.txt"]
+    );
+    assert!(names(&search("/search?owner=person:kim").await).is_empty());
     let sams = server
         .api(&server.sam, "GET", "/search?q=fuel", None)
         .await

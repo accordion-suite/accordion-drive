@@ -945,7 +945,10 @@ struct SearchQuery {
     /// A kind of item: one of the names in [`TYPES`], or "folders".
     #[serde(rename = "type")]
     kind: Option<String>,
-    /// `me`, `others`, or someone's username.
+    /// `me`, `others`, `shared` for what the user shared with anyone,
+    /// someone's username for what they own, or `person:` and their
+    /// username for what they own and what the user shared with them, as
+    /// the web app's People filter means.
     owner: Option<String>,
     /// `my-drive`, `shared`, or a folder's ID, which includes the folders
     /// inside it.
@@ -1313,7 +1316,11 @@ async fn search(
         None | Some("") => None,
         Some("me") => Some(Owner::Me),
         Some("others") => Some(Owner::Others),
-        Some(username) => Some(Owner::Person(state.person(username).await?)),
+        Some("shared") => Some(Owner::SharedByMe),
+        Some(people) => match people.strip_prefix("person:") {
+            Some(username) => Some(Owner::Involving(state.person(username).await?)),
+            None => Some(Owner::Person(state.person(people).await?)),
+        },
     };
     let place = match query.place.as_deref() {
         None | Some("") => None,
