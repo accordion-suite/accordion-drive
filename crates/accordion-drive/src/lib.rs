@@ -62,6 +62,19 @@ impl Module for Drive {
         "Drive"
     }
 
+    /// Everyone's files, with their earlier versions and the trash.
+    fn data_size(&self, services: &Services) -> BoxFuture<Option<u64>> {
+        let identity = services.identity.clone();
+        let storage = services.storage.clone();
+        Box::pin(async move {
+            let mut total = 0;
+            for member in identity.members().await.ok()? {
+                total += storage.usage(member.user.id).await.ok()?.used;
+            }
+            Some(total)
+        })
+    }
+
     fn start(
         &self,
         services: Services,
