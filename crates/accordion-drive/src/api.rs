@@ -38,7 +38,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::settings::{DriveSettings, NewSettings};
-use crate::{DriveState, activity, archive, colors, descriptions, links, sharing, sync, time};
+use crate::{
+    DriveState, activity, archive, colors, descriptions, links, places, sharing, sync, time,
+};
 
 /// Says where a piece of a resumable upload starts. The name follows the
 /// tus protocol, which uses the same header for the same purpose.
@@ -47,6 +49,9 @@ const UPLOAD_OFFSET: &str = "upload-offset";
 pub(crate) fn routes(state: DriveState) -> Router {
     Router::new()
         .route("/top", get(top))
+        .route("/places", get(places::places))
+        .route("/places/{place}", get(places::place))
+        .route("/move-check", post(places::move_check))
         .route("/items/{id}", get(item).patch(move_item).delete(trash_item))
         .route("/items/{id}/children", get(children).post(create_folder))
         .route("/items/{id}/children/{name}", put(write_file))
@@ -172,6 +177,10 @@ pub(crate) struct ItemView {
     shared: bool,
     /// For a folder: the color the signed-in user picked for it, if any.
     color: Option<String>,
+    /// For a top folder: which place it is, "drive" for My Drive, or an
+    /// app's, such as "notes" (decision 32).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    place: Option<String>,
 }
 
 /// What views need to know about the signed-in user.
@@ -258,6 +267,7 @@ impl ItemView {
         Self {
             id: item.id,
             parent: item.parent,
+            place: item.place,
             name: item.name,
             kind,
             version,
@@ -289,6 +299,10 @@ pub(crate) struct FoundView {
     /// top folder. For someone else's item, they start at the folder that
     /// was shared, and are empty for the shared item itself.
     pub(crate) folders: Vec<String>,
+    /// For the user's own items: the place `folders` starts in, "drive"
+    /// for My Drive, or an app's, such as "notes". Null for what's shared
+    /// with them.
+    pub(crate) place: Option<String>,
 }
 
 impl DriveState {
@@ -324,7 +338,12 @@ impl DriveState {
         })
     }
 
-    async fn view(&self, user: UserId, item: Item, access: Access) -> Result<ItemView, ApiError> {
+    pub(crate) async fn view(
+        &self,
+        user: UserId,
+        item: Item,
+        access: Access,
+    ) -> Result<ItemView, ApiError> {
         let reader = self.reader(user, [item.owner]).await?;
         let mut view = ItemView::new(item, access, &reader, &self.thumbnails);
         self.size_folders(std::slice::from_mut(&mut view)).await?;
@@ -424,6 +443,7 @@ impl DriveState {
             .map(|(found, access)| FoundView {
                 item: ItemView::new(found.item, access, &reader, &self.thumbnails),
                 folders: found.folders,
+                place: found.place,
             })
             .collect();
         self.size_folders(views.iter_mut().map(|view| &mut view.item))
@@ -624,6 +644,23 @@ struct MoveRequest {
     parent: Option<ItemId>,
     /// The new name. Leave it out to keep the name.
     name: Option<String>,
+    /// The people the person agreed may open the item once it's moved,
+    /// from `/move-check` or an earlier refusal. With it, a move that would
+    /// let anyone else open the item is refused with 409 and the code
+    /// `would_share`, listing everyone it would let in (decision 32).
+    /// Devices that can't ask, such as the desktop app, leave it out.
+    allow: Option<Vec<UserId>>,
+    /// With `allow`: whether the person agreed to links reaching the item.
+    #[serde(default)]
+    allow_links: bool,
+}
+
+/// What a move returns: the item, and who can't open it anymore.
+#[derive(Serialize)]
+struct MovedView {
+    #[serde(flatten)]
+    item: ItemView,
+    lost: Vec<places::PersonView>,
 }
 
 /// `PATCH /items/{id}`: renames an item, moves it, or both.
@@ -632,7 +669,7 @@ async fn move_item(
     Authenticated(me): Authenticated,
     Path(id): Path<ItemId>,
     Json(request): Json<MoveRequest>,
-) -> ItemResult {
+) -> Result<Response, ApiError> {
     let (item, access) = state.reach(me.user.id, id, Access::Editor).await?;
     // Editors move items only between folders they can edit, so nothing
     // leaves the shared folder unless its owner moves it.
@@ -640,9 +677,22 @@ async fn move_item(
         Some(parent) => state.reach(me.user.id, parent, Access::Editor).await?.0.id,
         None => item.parent.ok_or(storage::Error::TopFolder)?,
     };
+    let lost = if Some(parent) == item.parent {
+        Vec::new()
+    } else {
+        let allowed = request.allow.map(|people| places::Allowed {
+            people,
+            links: request.allow_links,
+        });
+        match state.check_move(id, parent, allowed).await? {
+            Ok(lost) => lost,
+            Err(refused) => return Ok(refused),
+        }
+    };
     let name = request.name.unwrap_or(item.name);
     let moved = state.by(&me).move_item(id, parent, &name).await?;
-    Ok(Json(state.view(me.user.id, moved, access).await?))
+    let item = state.view(me.user.id, moved, access).await?;
+    Ok(Json(MovedView { item, lost }).into_response())
 }
 
 /// `DELETE /items/{id}`: moves an item to the trash.

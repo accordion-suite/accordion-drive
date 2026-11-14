@@ -41,6 +41,11 @@ pub(crate) struct SyncItemView {
     /// it again with `/sync/folders/{id}`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     whole: bool,
+    /// For the person's own top folders: "drive" for My Drive, or an
+    /// app's place, such as "notes", which goes in a folder of its own
+    /// beside My Drive, named `name`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    place: Option<String>,
 }
 
 impl From<SyncItem> for SyncItemView {
@@ -61,6 +66,7 @@ impl From<SyncItem> for SyncItemView {
             modified_at: item.modified_at,
             access: access_name(entry.access),
             whole: entry.whole,
+            place: item.place,
         }
     }
 }
@@ -69,7 +75,8 @@ impl From<SyncItem> for SyncItemView {
 pub(crate) struct StartView {
     /// Follow `/sync/changes` from here once everything is listed.
     cursor: String,
-    /// The person's top folder, then what's shared with them.
+    /// The person's top folders, My Drive first, then what's shared with
+    /// them.
     roots: Vec<SyncItemView>,
 }
 

@@ -416,6 +416,16 @@ fn cases() -> Vec<Case> {
             Some(json!({ "parent": f.top, "name": "up.txt" }))
         ),
         case!("GET", "/sync/start", Own, |f| "/sync/start".into()),
+        case!("GET", "/places", Own, |f| "/places".into()),
+        // Each person's own My Drive, or their own place.
+        case!("GET", "/places/{place}", Own, |f| "/places/drive".into()),
+        case!(
+            "POST",
+            "/move-check",
+            Editor,
+            |f| "/move-check".into(),
+            Some(json!({ "items": [f.photo], "into": f.holiday }))
+        ),
         case!("GET", "/sync/folders/{id}", Viewer, |f| format!(
             "/sync/folders/{}",
             f.holiday

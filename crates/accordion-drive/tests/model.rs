@@ -1223,3 +1223,72 @@ async fn an_item_left_unmarked_is_marked_when_the_app_starts() {
     engine().sync().await.unwrap();
     assert_eq!(marks.marked.lock().unwrap().len(), before);
 }
+
+/// Decision 32: an app's place, such as Notes, syncs as a folder of its own
+/// beside My Drive, both ways, and a file moved between them here moves in
+/// Accordion too.
+#[tokio::test]
+async fn an_apps_place_syncs_beside_my_drive() {
+    let server = start().await;
+    server.storage.add_place(accordion_core::storage::AppPlace {
+        id: "notes",
+        name: "Notes",
+    });
+    let origin = serve(&server).await;
+    let token = server.alex.bearer["Bearer ".len()..].to_owned();
+    let top = server.storage.top_folder(server.alex.id).await.unwrap();
+    let notes = server
+        .storage
+        .place_folder(server.alex.id, "notes")
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut laptop = device(dir.path(), "Laptop");
+
+    server.file(notes, "Soup.md", "leeks").await;
+    server.file(top, "Plan.txt", "plan").await;
+    laptop.engine(&origin, &token).sync().await.unwrap();
+    let local_notes = laptop.root.join("Notes");
+    assert_eq!(
+        fs::read_to_string(local_notes.join("Soup.md")).unwrap(),
+        "leeks"
+    );
+    assert!(!laptop.my_drive().join("Soup.md").exists());
+    assert!(laptop.my_drive().join("Plan.txt").is_file());
+
+    // Made here, in Notes.
+    write(&local_notes.join("Bread.md"), "flour");
+    // Moved here, from My Drive to Notes.
+    fs::rename(
+        laptop.my_drive().join("Plan.txt"),
+        local_notes.join("Plan.txt"),
+    )
+    .unwrap();
+    for _ in 0..3 {
+        laptop.engine(&origin, &token).sync().await.unwrap();
+    }
+    assert_eq!(
+        local_tree(&local_notes),
+        server_tree(&server.storage, notes).await
+    );
+    assert_eq!(
+        local_tree(&laptop.my_drive()),
+        server_tree(&server.storage, top).await
+    );
+    assert!(
+        server
+            .storage
+            .find(notes, vec!["Plan.txt".into()])
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        server
+            .storage
+            .find(notes, vec!["Bread.md".into()])
+            .await
+            .unwrap()
+            .is_some()
+    );
+}

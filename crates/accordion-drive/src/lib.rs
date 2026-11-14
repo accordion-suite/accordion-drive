@@ -15,6 +15,7 @@ mod dav;
 mod descriptions;
 mod link_pages;
 mod links;
+mod places;
 mod settings;
 mod sharing;
 mod stars;
@@ -95,6 +96,7 @@ impl Module for Drive {
                     dav::Address::MyDrive,
                 )),
                 shared_dav: Arc::new(dav::handler(services.storage.clone(), dav::Address::Shared)),
+                places_dav: Arc::new(dav::handler(services.storage.clone(), dav::Address::Places)),
                 storage: services.storage,
                 thumbnails: services.thumbnails,
                 texts: services.texts,
@@ -104,10 +106,16 @@ impl Module for Drive {
                 routes: Routes {
                     api: Some(api::routes(state.clone())),
                     dav: Some(dav::routes(state.clone(), dav::Address::MyDrive)),
-                    more_dav: vec![(
-                        dav::SHARED,
-                        dav::routes(state.clone(), dav::Address::Shared),
-                    )],
+                    more_dav: vec![
+                        (
+                            dav::SHARED,
+                            dav::routes(state.clone(), dav::Address::Shared),
+                        ),
+                        (
+                            dav::PLACES,
+                            dav::routes(state.clone(), dav::Address::Places),
+                        ),
+                    ],
                     pages: None,
                     links: Some(link_pages::routes(state)),
                 },
@@ -134,6 +142,8 @@ struct DriveState {
     dav: Arc<dav_server::DavHandler<dav::Credentials>>,
     /// For `/dav/shared`.
     shared_dav: Arc<dav_server::DavHandler<dav::Credentials>>,
+    /// For `/dav/places`.
+    places_dav: Arc<dav_server::DavHandler<dav::Credentials>>,
 }
 
 impl FromRef<DriveState> for Identity {

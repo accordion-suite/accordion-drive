@@ -58,6 +58,7 @@ use crate::{DriveState, archive, time};
 /// The name of the second address, for what others shared, at
 /// `/dav/shared`.
 pub(crate) const SHARED: &str = "shared";
+pub(crate) const PLACES: &str = "places";
 
 /// How much of a file each read sends. dav-server's default is 16 KB, and
 /// each read is a trip to tokio's blocking threads, so downloads spent more
@@ -73,6 +74,9 @@ pub(crate) enum Address {
     MyDrive,
     /// `/dav/shared`.
     Shared,
+    /// `/dav/places`, with a folder for each app's place, such as Notes
+    /// (decision 32).
+    Places,
 }
 
 impl Address {
@@ -80,6 +84,7 @@ impl Address {
         match self {
             Self::MyDrive => "/dav/drive",
             Self::Shared => "/dav/shared",
+            Self::Places => "/dav/places",
         }
     }
 }
@@ -96,15 +101,21 @@ pub(crate) struct Credentials {
 enum Place {
     /// The user's own top folder.
     MyDrive(ItemId),
-    /// What others shared with the user, each by the name it shows.
-    Shared(Arc<Vec<(String, Item)>>),
+    /// A list of top items, each by the name it shows: what others shared
+    /// with the user, or the user's own places. `owned` when they're the
+    /// user's own.
+    List {
+        items: Arc<Vec<(String, Item)>>,
+        owned: bool,
+    },
 }
 
 /// What a path names.
 enum Target {
-    /// The top of `/dav/shared`, which lists what's shared. Nothing can be
-    /// added to it, and it isn't anyone's folder.
-    SharedList,
+    /// The top of `/dav/shared` or `/dav/places`, which lists what's
+    /// shared, or the places. Nothing can be added to it, and it isn't
+    /// anyone's folder.
+    List,
     Item(Box<Item>, Access),
 }
 
@@ -170,7 +181,23 @@ async fn signed_in(
     let user = using.user.id;
     let place = match address {
         Address::MyDrive => Place::MyDrive(state.storage.top_folder(user).await?),
-        Address::Shared => Place::Shared(Arc::new(shared_names(&state, user).await?)),
+        Address::Shared => Place::List {
+            items: Arc::new(shared_names(&state, user).await?),
+            owned: false,
+        },
+        Address::Places => Place::List {
+            items: Arc::new(
+                state
+                    .storage
+                    .own_places(user)
+                    .await?
+                    .into_iter()
+                    .filter(|top| top.place.as_deref() != Some(storage::MY_DRIVE))
+                    .map(|top| (top.name.clone(), top))
+                    .collect(),
+            ),
+            owned: true,
+        },
     };
     let credentials = Credentials { user, place };
     // The server strips the prefix before routing, but the links that
@@ -186,6 +213,7 @@ async fn signed_in(
     let dav = match address {
         Address::MyDrive => &state.dav,
         Address::Shared => &state.shared_dav,
+        Address::Places => &state.places_dav,
     };
     let response = dav
         .handle_guarded(
@@ -310,7 +338,7 @@ fn names(path: &DavPath) -> FsResult<Vec<String>> {
 fn fs_error(err: storage::Error) -> FsError {
     use storage::Error::*;
     match err {
-        NotFound | UserNotFound | UploadNotFound => FsError::NotFound,
+        NotFound | UserNotFound | UploadNotFound | UnknownPlace(_) => FsError::NotFound,
         NameTaken { .. } => FsError::Exists,
         InvalidName
         | NotAFolder
@@ -362,16 +390,16 @@ impl DriveFs {
     ) -> FsResult<Target> {
         let (from, access) = match &credentials.place {
             Place::MyDrive(top) => (*top, Some(Access::Owner)),
-            Place::Shared(shared) => {
+            Place::List { items, owned } => {
                 if names.is_empty() {
-                    return Ok(Target::SharedList);
+                    return Ok(Target::List);
                 }
                 let first = names.remove(0);
-                let (_, item) = shared
+                let (_, item) = items
                     .iter()
                     .find(|(name, _)| *name == first)
                     .ok_or(FsError::NotFound)?;
-                (item.id, None)
+                (item.id, owned.then_some(Access::Owner))
             }
         };
         let item = self
@@ -504,8 +532,8 @@ impl GuardedFileSystem<Credentials> for DriveFs {
     ) -> FsFuture<'a, FsStream<Box<dyn DavDirEntry>>> {
         Box::pin(async move {
             let children: Vec<(String, Item)> = match self.target(credentials, path).await? {
-                Target::SharedList => match &credentials.place {
-                    Place::Shared(shared) => shared.as_ref().clone(),
+                Target::List => match &credentials.place {
+                    Place::List { items, .. } => items.as_ref().clone(),
                     Place::MyDrive(_) => Vec::new(),
                 },
                 Target::Item(folder, _) if folder.kind == ItemKind::Folder => self
@@ -535,7 +563,7 @@ impl GuardedFileSystem<Credentials> for DriveFs {
     ) -> FsFuture<'a, Box<dyn DavMetaData>> {
         Box::pin(async move {
             let meta = match self.target(credentials, path).await? {
-                Target::SharedList => Meta::shared_list(),
+                Target::List => Meta::list(),
                 Target::Item(item, _) => Meta::of(&item),
             };
             Ok(Box::new(meta) as Box<dyn DavMetaData>)
@@ -655,7 +683,7 @@ struct Meta {
 
 impl Meta {
     /// The top of `/dav/shared`, which no one changes.
-    fn shared_list() -> Self {
+    fn list() -> Self {
         Self {
             folder: true,
             len: 0,
