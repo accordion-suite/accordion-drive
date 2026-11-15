@@ -3,6 +3,7 @@
 // Each test file uses a different part of this module.
 #![allow(dead_code)]
 
+use accordion_core::coedit::{CoEditing, Timing};
 use accordion_core::db::Database;
 use accordion_core::events::Events;
 use accordion_core::identity::{AppPasswordUse, AuthMethod, Client, Identity, NewUser};
@@ -105,7 +106,15 @@ pub async fn start() -> Server {
     let started = Drive
         .start(
             Services {
-                db,
+                db: db.clone(),
+                coediting: CoEditing::open(
+                    db.clone(),
+                    storage.clone(),
+                    identity.clone(),
+                    Timing::default(),
+                )
+                .await
+                .unwrap(),
                 identity: identity.clone(),
                 storage: storage.clone(),
                 thumbnails: thumbnails.clone(),
