@@ -1292,3 +1292,97 @@ async fn an_apps_place_syncs_beside_my_drive() {
             .is_some()
     );
 }
+
+/// Found on November 16, 2026: a place made after a device's first sync,
+/// such as Notes the first time someone opens it, never reached the device.
+/// Making it recorded no change, and the notes inside waited for a folder
+/// that never came.
+#[tokio::test]
+async fn a_place_made_after_the_first_sync_reaches_the_device() {
+    let server = start().await;
+    server.storage.add_place(accordion_core::storage::AppPlace {
+        id: "notes",
+        name: "Notes",
+    });
+    let origin = serve(&server).await;
+    let token = server.alex.bearer["Bearer ".len()..].to_owned();
+    let top = server.storage.top_folder(server.alex.id).await.unwrap();
+    server.file(top, "Plan.txt", "plan").await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut laptop = device(dir.path(), "Laptop");
+    laptop.engine(&origin, &token).sync().await.unwrap();
+    assert!(laptop.my_drive().join("Plan.txt").is_file());
+
+    let notes = server
+        .storage
+        .place_folder(server.alex.id, "notes")
+        .await
+        .unwrap();
+    server.file(notes, "Soup.md", "leeks").await;
+    laptop.engine(&origin, &token).sync().await.unwrap();
+    assert_eq!(
+        fs::read_to_string(laptop.root.join("Notes").join("Soup.md")).unwrap(),
+        "leeks"
+    );
+}
+
+/// A device that synced before places followed the list of changes past a
+/// place it never heard of, so its engine lists everything again once.
+#[tokio::test]
+async fn a_device_from_before_places_lists_everything_again_once() {
+    let server = start().await;
+    server.storage.add_place(accordion_core::storage::AppPlace {
+        id: "notes",
+        name: "Notes",
+    });
+    let origin = serve(&server).await;
+    let token = server.alex.bearer["Bearer ".len()..].to_owned();
+    let top = server.storage.top_folder(server.alex.id).await.unwrap();
+    server.file(top, "Plan.txt", "plan").await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut laptop = device(dir.path(), "Laptop");
+    laptop.engine(&origin, &token).sync().await.unwrap();
+
+    // Notes was made while an older engine followed the changes past it.
+    let notes = server
+        .storage
+        .place_folder(server.alex.id, "notes")
+        .await
+        .unwrap();
+    server.file(notes, "Soup.md", "leeks").await;
+    laptop.engine = None;
+    let now = server
+        .storage
+        .sync_start(server.alex.id)
+        .await
+        .unwrap()
+        .cursor;
+    State::open(&laptop.db)
+        .unwrap()
+        .set_cursor(Some(&now))
+        .unwrap();
+    accordion_core::db::rusqlite::Connection::open(&laptop.db)
+        .unwrap()
+        .execute("DELETE FROM meta WHERE key = 'knows_places'", [])
+        .unwrap();
+
+    let report = laptop.engine(&origin, &token).sync().await.unwrap();
+    assert_eq!(
+        fs::read_to_string(laptop.root.join("Notes").join("Soup.md")).unwrap(),
+        "leeks"
+    );
+    assert!(laptop.my_drive().join("Plan.txt").is_file());
+    // Nothing in My Drive came down again.
+    assert!(
+        !report.done.iter().any(|done| done.contains("Plan.txt")),
+        "{:?}",
+        report.done
+    );
+    assert!(
+        State::open(&laptop.db)
+            .unwrap()
+            .meta("knows_places")
+            .unwrap()
+            .is_some()
+    );
+}
