@@ -240,7 +240,9 @@ pub(crate) async fn notifications(
             folder,
             event.at.get(..10).map(str::to_owned),
         );
+        // Each reminder is its own, with its own snooze and done.
         if folder.is_some()
+            && event.action != Action::ReminderDue
             && last_key.as_ref() == Some(&key)
             && let Some(group) = views.last_mut()
         {

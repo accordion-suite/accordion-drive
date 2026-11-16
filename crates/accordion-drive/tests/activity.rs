@@ -235,3 +235,39 @@ async fn notifications_group_changes_and_mark_read() {
     let sams = ok(server.api(sam, "GET", "/notifications", None).await);
     assert_eq!(sams["notifications"], json!([]));
 }
+
+#[tokio::test]
+async fn each_reminder_is_a_notification_of_its_own() {
+    use accordion_core::events::{Action, Actor, NewEvent};
+    use accordion_types::ItemId;
+
+    let server = start().await;
+    let alex = &server.alex;
+    let top = top(&server, alex).await;
+    let notes = folder(&server, alex, &top, "Notes").await;
+    for name in ["Groceries.md", "Vet.md"] {
+        let id: ItemId = put_file(&server, alex, &notes, name).await.parse().unwrap();
+        server
+            .events
+            .record(
+                Actor::SERVER,
+                NewEvent::about(Action::ReminderDue, id, alex.id)
+                    .other(alex.id)
+                    .details(json!({"local": "2026-11-20T09:00", "repeat": null})),
+            )
+            .await
+            .unwrap();
+    }
+    let alexs = ok(server.api(alex, "GET", "/notifications", None).await);
+    let reminders: Vec<&Value> = alexs["notifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|each| each["action"] == "reminder_due")
+        .collect();
+    assert_eq!(reminders.len(), 2);
+    assert_eq!(reminders[0]["item"]["name"], "Vet.md");
+    assert_eq!(reminders[0]["actor"], Value::Null);
+    assert_eq!(reminders[0]["details"]["local"], "2026-11-20T09:00");
+    assert_eq!(reminders[1]["count"], 1);
+}

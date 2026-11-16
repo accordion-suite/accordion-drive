@@ -34,6 +34,8 @@ pub struct Server {
     pub storage: Storage,
     pub thumbnails: Thumbnails,
     pub texts: Texts,
+    /// For events modules other than Drive record, such as Notes' reminders.
+    pub events: Events,
     pub alex: Person,
     pub sam: Person,
     /// Two more, for sharing.
@@ -120,7 +122,7 @@ pub async fn start() -> Server {
                 thumbnails: thumbnails.clone(),
                 texts: texts.clone(),
                 live,
-                events,
+                events: events.clone(),
                 link_origin: link_origin_receiver,
             },
             Stopping::new(stopping),
@@ -141,6 +143,7 @@ pub async fn start() -> Server {
             std::net::SocketAddr::from(([203, 0, 113, 9], 50000)),
         ));
     Server {
+        events,
         alex: person(&identity, "alex").await,
         sam: person(&identity, "sam").await,
         kim: person(&identity, "kim").await,
