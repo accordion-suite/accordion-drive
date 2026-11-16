@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "accordion-core"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#40a12d16e765766e5ea901d7a96768faecb7e25a"
+source = "git+https://github.com/accordion-suite/accordion-core#5041c3cbb44f5ac69ec96ef0d325df4a78a0241e"
 dependencies = [
  "accordion-sandbox",
  "accordion-types",
@@ -61,7 +61,7 @@ dependencies = [
 [[package]]
 name = "accordion-module"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#40a12d16e765766e5ea901d7a96768faecb7e25a"
+source = "git+https://github.com/accordion-suite/accordion-core#5041c3cbb44f5ac69ec96ef0d325df4a78a0241e"
 dependencies = [
  "accordion-core",
  "accordion-types",
@@ -75,7 +75,7 @@ dependencies = [
 [[package]]
 name = "accordion-sandbox"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#40a12d16e765766e5ea901d7a96768faecb7e25a"
+source = "git+https://github.com/accordion-suite/accordion-core#5041c3cbb44f5ac69ec96ef0d325df4a78a0241e"
 dependencies = [
  "landlock",
  "libc",
@@ -88,7 +88,7 @@ dependencies = [
 [[package]]
 name = "accordion-sync"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#40a12d16e765766e5ea901d7a96768faecb7e25a"
+source = "git+https://github.com/accordion-suite/accordion-core#5041c3cbb44f5ac69ec96ef0d325df4a78a0241e"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -116,7 +116,7 @@ dependencies = [
 [[package]]
 name = "accordion-types"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#40a12d16e765766e5ea901d7a96768faecb7e25a"
+source = "git+https://github.com/accordion-suite/accordion-core#5041c3cbb44f5ac69ec96ef0d325df4a78a0241e"
 dependencies = [
  "serde",
  "uuid",
