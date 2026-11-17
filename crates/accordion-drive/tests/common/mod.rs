@@ -119,6 +119,16 @@ pub async fn start() -> Server {
                 .unwrap(),
                 identity: identity.clone(),
                 storage: storage.clone(),
+                transcripts: accordion_core::transcripts::Transcripts::open(
+                    db.clone(),
+                    storage.clone(),
+                    dir.path(),
+                    accordion_core::transcripts::Tools::installed("/nonexistent"),
+                    None,
+                    accordion_core::transcripts::MODELS_URL,
+                )
+                .await
+                .unwrap(),
                 thumbnails: thumbnails.clone(),
                 texts: texts.clone(),
                 live,
