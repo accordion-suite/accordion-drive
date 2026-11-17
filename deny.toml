@@ -21,6 +21,10 @@ ignore = [
     # through core's co-editing service, and yrs 0.28.1 is the newest release
     # (November 2026). Drop this when yrs moves off it.
     "RUSTSEC-2026-0215",
+    # chrono is unmaintained, with no known vulnerability. Only dav-server
+    # uses it, for WebDAV's dates, and dav-server 0.11.0 is the newest release
+    # (November 2026). Drop this when dav-server moves off it.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]
