@@ -150,8 +150,9 @@ pub(crate) struct ItemView {
     /// document may go on past them.
     preview_partial: bool,
     /// What `/items/{id}/thumbnail` has for the file yet: "picture", a small
-    /// WebP, or "text", its first lines. Core makes them in the background,
-    /// so a new photo gets one soon.
+    /// WebP, "text", its first lines, or "page", an HTML page's first lines
+    /// as JSON, with their headings and styles. Core makes them in the
+    /// background, so a new photo gets one soon.
     thumbnail: Option<&'static str>,
     /// Changes each time core makes the thumbnail again, such as when a
     /// newer worker makes a better one. Browsers keep a thumbnail for a
@@ -262,6 +263,8 @@ impl ItemView {
             // A song or a video that happens to be text, such as a
             // placeholder, would look broken as a page of text.
             ThumbnailKind::Text => text_kind(file_type).then_some("text"),
+            // An HTML page's lines, with their headings and styles.
+            ThumbnailKind::Page => text_kind(file_type).then_some("page"),
         });
         let thumbnail_version = thumbnail.and(found.as_ref()).map(|found| found.version());
         Self {
@@ -1303,7 +1306,7 @@ pub(crate) fn item_type(name: &str, thumbnail: Option<ThumbnailKind>) -> Option<
             .find(|(known, _, _)| extension.eq_ignore_ascii_case(known))
     });
     match (shared, thumbnail) {
-        (Some((_, text, _)), Some(ThumbnailKind::Text)) => Some(text),
+        (Some((_, text, _)), Some(ThumbnailKind::Text | ThumbnailKind::Page)) => Some(text),
         (Some((_, _, picture)), Some(ThumbnailKind::Picture)) => Some(picture),
         _ => file_type(name),
     }
@@ -1686,7 +1689,8 @@ async fn preview_named(
 }
 
 /// `GET /items/{id}/thumbnail`: a small picture of the file's current
-/// version, as WebP, or a text file's first lines, as UTF-8, for the grid.
+/// version, as WebP, a text file's first lines, as UTF-8, or an HTML page's,
+/// as JSON, for the grid.
 /// The web app adds the version's hash to the address, such as `?v=3f9a…`,
 /// so browsers can keep each one for a year.
 async fn thumbnail(

@@ -1214,6 +1214,39 @@ async fn sends_thumbnails_once_core_makes_them() {
     assert_eq!(reply.headers["content-security-policy"], "sandbox");
     assert_eq!(&reply.body[..], b"Pick up the bread.");
 
+    // A page's is its first lines, as JSON with their kinds and styles.
+    let page = write(
+        &server,
+        &top,
+        "Plan.html",
+        "<!DOCTYPE html>\n<html><h1>Plan</h1><p>Buy <b>bread</b></p></html>",
+    )
+    .await;
+    let item = server
+        .api(alex, "GET", &format!("/items/{page}"), None)
+        .await
+        .json();
+    let hash =
+        accordion_core::storage::ContentHash::from_hex(item["sha256"].as_str().unwrap()).unwrap();
+    assert!(server.thumbnails.make_now(hash).await.unwrap());
+    let item = server
+        .api(alex, "GET", &format!("/items/{page}"), None)
+        .await
+        .json();
+    assert_eq!(item["thumbnail"], "page");
+    let reply = server
+        .api(alex, "GET", &format!("/items/{page}/thumbnail"), None)
+        .await;
+    assert_eq!(reply.headers["content-type"], "application/json");
+    let lines: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(
+        lines["lines"],
+        json!([
+            {"kind": "heading", "level": 1, "runs": [{"text": "Plan"}]},
+            {"kind": "paragraph", "runs": [{"text": "Buy "}, {"text": "bread", "bold": true}]},
+        ])
+    );
+
     // Unless its name says it's something else, such as a song.
     let song = write(&server, &top, "song.mp3", "Not really a song.").await;
     let item = server
