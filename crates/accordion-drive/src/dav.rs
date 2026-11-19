@@ -570,6 +570,15 @@ impl GuardedFileSystem<Credentials> for DriveFs {
         })
     }
 
+    /// Drive has no symbolic links, so a link's metadata is the item's own.
+    fn symlink_metadata<'a>(
+        &'a self,
+        path: &'a DavPath,
+        credentials: &'a Credentials,
+    ) -> FsFuture<'a, Box<dyn DavMetaData>> {
+        self.metadata(path, credentials)
+    }
+
     fn create_dir<'a>(
         &'a self,
         path: &'a DavPath,
@@ -731,6 +740,10 @@ impl DavMetaData for Meta {
 
     fn is_dir(&self) -> bool {
         self.folder
+    }
+
+    fn is_symlink(&self) -> bool {
+        false
     }
 
     fn etag(&self) -> Option<String> {
