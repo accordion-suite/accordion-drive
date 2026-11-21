@@ -13,6 +13,8 @@ Drive keeps no files of its own. Core's storage service holds every file, versio
 | Path | What it's for | How it signs in |
 |---|---|---|
 | `/api/drive/` | The JSON API, described in `src/api.rs` | Session cookie or bearer token |
+| `/api/drive/sync/` | Where a syncing device starts, what's inside each folder, and the list of changes since its cursor ([decision 23](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0023-sync.md)), described in `src/sync.rs` | Session cookie or bearer token |
+| `/s/{token}` on the link sharing port | The pages a shared link opens, for people without an account: plain HTML with no scripts, reaching only the linked item and what's inside it ([decision 22](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0022-link-sharing.md)) | The link, and its password if it has one |
 | `/dav/drive/` | WebDAV, with each person's My Drive at the root | Username and app password |
 | `/dav/places/` | WebDAV, with a folder for each app's place, such as `Notes`, at the root ([decision 32](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0032-a-place-for-each-apps-files.md)) | Username and app password |
 | `/dav/shared/` | WebDAV, with what others shared with each person at the root. If two shared items have the same name, the newer one gets its owner's name, such as "Holiday (Alex)" | Username and app password |
@@ -21,10 +23,10 @@ A few things work differently from a plain file server:
 
 - **Apps keep their files in places of their own,** beside My Drive, such as Notes. Drive shows each as a tab, and files move between them like between folders.
 - **A move that would share something asks first** in the web app. A move through `PATCH /items/{id}` that lists who it allows in `allow` is refused with `409` and the code `would_share` if it would let anyone else open the item. Apps ask `/move-check` first. Devices that can't ask leave `allow` out.
-
+- **Activity and the bell** come from core's event log ([decision 18](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0018-the-event-log.md)). Changes close together are grouped, and live updates tell open pages when to ask again ([decision 19](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0019-live-updates.md)).
 - **Deleting moves to the trash,** over WebDAV too. A deleted folder goes to the trash whole, even from File Explorer, which deletes what's inside a folder one item at a time first.
 - **Every save is a new version,** except that saving over an empty file replaces it. File Explorer saves each new file empty first. Saving part of a file isn't supported, so WebDAV requests that change only part of a file get `501 Not Implemented`.
-- **WebDAV locks always succeed.** Windows and macOS need lock support to save files, and versions keep every save, so two people saving at once can't lose either copy.
+- **WebDAV locks always succeed -** Windows and macOS need lock support to save files, and versions keep every save, so two people saving at once can't lose either copy.
 
 ## Building
 
@@ -33,6 +35,14 @@ Install Rust with [rustup](https://rustup.rs), then run these commands from the 
 ```sh
 cargo build --workspace
 cargo test --workspace
+```
+
+The thumbnail and search tests run real programs in the sandbox, so they need what `accordion-core`'s tests need: a Linux kernel with Landlock, and libvips and the other programs its README lists.
+
+The sync model tests in `tests/model.rs` run three devices with the real sync engine against Drive, changing files at random. Each run repeats from its seed. To run more, or longer:
+
+```sh
+ACCORDION_MODEL_SEEDS=1-20 ACCORDION_MODEL_STEPS=2000 cargo test --test model -- --nocapture
 ```
 
 To build against your own checkout of `accordion-core`, clone the workspace with `scripts/clone-workspace.sh` in the `accordion` repo. Before you commit `Cargo.lock`, push `accordion-core` and run `scripts/pin-versions.sh ../accordion-drive` from the `accordion` repo.
