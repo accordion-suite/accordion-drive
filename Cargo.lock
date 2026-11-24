@@ -5,12 +5,13 @@ version = 4
 [[package]]
 name = "accordion-core"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#7a3d02f49bf329faabaefb198ca7c63032d71849"
+source = "git+https://github.com/accordion-suite/accordion-core#14156d56a2ffd158774d2ad4da145f04bfc43be3"
 dependencies = [
  "accordion-sandbox",
  "accordion-types",
  "argon2",
  "base64ct",
+ "flate2",
  "getrandom 0.4.3",
  "html5ever",
  "jiff",
@@ -21,6 +22,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "similar",
+ "tar",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -62,7 +64,7 @@ dependencies = [
 [[package]]
 name = "accordion-module"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#7a3d02f49bf329faabaefb198ca7c63032d71849"
+source = "git+https://github.com/accordion-suite/accordion-core#14156d56a2ffd158774d2ad4da145f04bfc43be3"
 dependencies = [
  "accordion-core",
  "accordion-types",
@@ -76,7 +78,7 @@ dependencies = [
 [[package]]
 name = "accordion-sandbox"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#7a3d02f49bf329faabaefb198ca7c63032d71849"
+source = "git+https://github.com/accordion-suite/accordion-core#14156d56a2ffd158774d2ad4da145f04bfc43be3"
 dependencies = [
  "landlock",
  "libc",
@@ -89,7 +91,7 @@ dependencies = [
 [[package]]
 name = "accordion-sync"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#7a3d02f49bf329faabaefb198ca7c63032d71849"
+source = "git+https://github.com/accordion-suite/accordion-core#14156d56a2ffd158774d2ad4da145f04bfc43be3"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -117,7 +119,7 @@ dependencies = [
 [[package]]
 name = "accordion-types"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#7a3d02f49bf329faabaefb198ca7c63032d71849"
+source = "git+https://github.com/accordion-suite/accordion-core#14156d56a2ffd158774d2ad4da145f04bfc43be3"
 dependencies = [
  "serde",
  "uuid",
@@ -801,6 +803,16 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "filetime"
+version = "0.2.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1255e7a9f1902190d4c10a75f2f7f495d3d3ce13e9ba26e6c48683a0f4dbed7"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -2411,6 +2423,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
 ]
 
 [[package]]
