@@ -13,6 +13,7 @@ mod archive;
 mod colors;
 mod dav;
 mod descriptions;
+mod importer;
 mod link_pages;
 mod links;
 mod places;
@@ -20,6 +21,7 @@ mod settings;
 mod sharing;
 mod stars;
 mod sync;
+pub mod takeout;
 mod time;
 
 use std::sync::Arc;
@@ -28,6 +30,7 @@ use accordion_core::db::Migration;
 use accordion_core::events::Events;
 use accordion_core::identity::{Identity, SignedIn};
 use accordion_core::storage::{Access, Item, Storage};
+use accordion_core::takeout::Product;
 use accordion_core::texts::Texts;
 use accordion_core::thumbnails::Thumbnails;
 use accordion_module::{
@@ -50,6 +53,11 @@ static MIGRATIONS: &[Migration] = &[
     settings::CLICK_MIGRATION,
     links::MIGRATION,
 ];
+
+/// What Drive brings from Google Takeout (decision 34): Google Drive's
+/// files. The server's program answers the sandbox's `takeout-read` with
+/// these.
+pub static TAKEOUT_PRODUCTS: [&dyn Product; 1] = [&takeout::GoogleDrive];
 
 /// The Drive module. Add it to the server's list of modules.
 pub struct Drive;
@@ -76,10 +84,14 @@ impl Module for Drive {
         })
     }
 
+    fn takeout_products(&self) -> &'static [&'static dyn Product] {
+        &TAKEOUT_PRODUCTS
+    }
+
     fn start(
         &self,
         services: Services,
-        _stopping: Stopping,
+        stopping: Stopping,
     ) -> BoxFuture<Result<Started, StartError>> {
         Box::pin(async move {
             services.db.migrate(OWNER, MIGRATIONS).await?;
@@ -102,6 +114,13 @@ impl Module for Drive {
                 texts: services.texts,
                 events: services.events,
             };
+            // Google Drive's files from Takeout, while Drive is on.
+            let importing = services
+                .takeout
+                .add_importer(Arc::new(importer::DriveImporter {
+                    stars: state.stars.clone(),
+                    descriptions: state.descriptions.clone(),
+                }));
             Ok(Started {
                 routes: Routes {
                     api: Some(api::routes(state.clone())),
@@ -119,7 +138,10 @@ impl Module for Drive {
                     pages: None,
                     links: Some(link_pages::routes(state)),
                 },
-                background: None,
+                background: Some(Box::pin(async move {
+                    stopping.wait().await;
+                    drop(importing);
+                })),
             })
         })
     }

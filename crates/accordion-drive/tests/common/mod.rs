@@ -9,6 +9,7 @@ use accordion_core::events::Events;
 use accordion_core::identity::{AppPasswordUse, AuthMethod, Client, Identity, NewUser};
 use accordion_core::live::Live;
 use accordion_core::storage::Storage;
+use accordion_core::takeout::{self, Imports, Takeout};
 use accordion_core::texts::{self, Texts};
 use accordion_core::thumbnails::{Thumbnails, Tools};
 use accordion_drive::Drive;
@@ -36,6 +37,8 @@ pub struct Server {
     pub texts: Texts,
     /// For events modules other than Drive record, such as Notes' reminders.
     pub events: Events,
+    /// Imports from Google Takeout, read by the sandbox launcher.
+    pub imports: Imports,
     pub alex: Person,
     pub sam: Person,
     /// Two more, for sharing.
@@ -102,6 +105,19 @@ pub async fn start() -> Server {
     .unwrap();
     let events = Events::open(db.clone()).await.unwrap();
     let live = Live::new(db.clone(), &identity);
+    let scratch = dir.path().join("takeout");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let imports = Imports::open(
+        db.clone(),
+        storage.clone(),
+        events.clone(),
+        Takeout::new(
+            takeout::Tools::installed(env!("CARGO_BIN_EXE_accordion-drive-sandbox")),
+            scratch,
+        ),
+    )
+    .await
+    .unwrap();
     let (stop, stopping) = watch::channel(false);
     let (link_origin, link_origin_receiver) =
         watch::channel(Some("https://f8q2m.accordion.example.com".to_owned()));
@@ -134,11 +150,16 @@ pub async fn start() -> Server {
                 live,
                 events: events.clone(),
                 link_origin: link_origin_receiver,
+                takeout: imports.clone(),
             },
             Stopping::new(stopping),
         )
         .await
         .unwrap();
+    // Drive's importer for Takeout, while Drive is on.
+    if let Some(background) = started.background {
+        tokio::spawn(background);
+    }
     let mut router = Router::new()
         .nest("/api/drive", started.routes.api.unwrap())
         .nest_service("/dav/drive", started.routes.dav.unwrap());
@@ -154,6 +175,7 @@ pub async fn start() -> Server {
         ));
     Server {
         events,
+        imports,
         alex: person(&identity, "alex").await,
         sam: person(&identity, "sam").await,
         kim: person(&identity, "kim").await,
