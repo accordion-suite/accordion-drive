@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "accordion-core"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#14156d56a2ffd158774d2ad4da145f04bfc43be3"
+source = "git+https://github.com/accordion-suite/accordion-core#364e69f5500749b91abb3055764839d48b88db8a"
 dependencies = [
  "accordion-sandbox",
  "accordion-types",
@@ -64,7 +64,7 @@ dependencies = [
 [[package]]
 name = "accordion-module"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#14156d56a2ffd158774d2ad4da145f04bfc43be3"
+source = "git+https://github.com/accordion-suite/accordion-core#364e69f5500749b91abb3055764839d48b88db8a"
 dependencies = [
  "accordion-core",
  "accordion-types",
@@ -78,7 +78,7 @@ dependencies = [
 [[package]]
 name = "accordion-sandbox"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#14156d56a2ffd158774d2ad4da145f04bfc43be3"
+source = "git+https://github.com/accordion-suite/accordion-core#364e69f5500749b91abb3055764839d48b88db8a"
 dependencies = [
  "landlock",
  "libc",
@@ -91,7 +91,7 @@ dependencies = [
 [[package]]
 name = "accordion-sync"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#14156d56a2ffd158774d2ad4da145f04bfc43be3"
+source = "git+https://github.com/accordion-suite/accordion-core#364e69f5500749b91abb3055764839d48b88db8a"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -119,7 +119,7 @@ dependencies = [
 [[package]]
 name = "accordion-types"
 version = "0.1.0"
-source = "git+https://github.com/accordion-suite/accordion-core#14156d56a2ffd158774d2ad4da145f04bfc43be3"
+source = "git+https://github.com/accordion-suite/accordion-core#364e69f5500749b91abb3055764839d48b88db8a"
 dependencies = [
  "serde",
  "uuid",
@@ -355,9 +355,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
-version = "1.12.1"
+version = "1.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
 
 [[package]]
 name = "cc"
@@ -3204,9 +3204,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.6.0"
+version = "9.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80cc68510ea7553c30a69c732de5278e94183f68765af6c642dbccefd6ec777e"
+checksum = "a9534624d547e3f516ecde0ed9a70d37788f01d340efcfdd03bf3ea8e163c1d0"
 dependencies = [
  "constant_time_eq 0.6.1",
  "crc32fast",
