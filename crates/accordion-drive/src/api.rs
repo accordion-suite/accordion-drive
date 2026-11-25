@@ -168,8 +168,8 @@ pub(crate) struct ItemView {
     trashed_at: Option<String>,
     /// Whether the signed-in user starred it.
     starred: bool,
-    /// What the signed-in user may do with it: "owner", "editor", or
-    /// "viewer".
+    /// What the signed-in user may do with it: "owner", "editor",
+    /// "commenter", or "viewer".
     access: &'static str,
     /// The owner's name, when it's someone else's.
     owner: Option<String>,
@@ -201,6 +201,7 @@ pub(crate) fn access_name(access: Access) -> &'static str {
     match access {
         Access::Owner => "owner",
         Access::Editor => "editor",
+        Access::Commenter => "commenter",
         Access::Viewer => "viewer",
     }
 }

@@ -221,6 +221,19 @@ async fn a_shared_folder_arrives_whole_and_leaves_as_gone() {
         .api(&server.sam, "GET", &format!("/sync/folders/{folder}"), None)
         .await;
     assert_eq!(listed.status, StatusCode::NOT_FOUND);
+
+    // Devices don't know commenters, who can't change files either, so
+    // they're told "viewer" and keep it read-only.
+    server
+        .json(
+            &server.alex,
+            "PUT",
+            &format!("/items/{folder}/shares/{sam}"),
+            Some(json!({ "level": "commenter" })),
+        )
+        .await;
+    let (changes, _) = server.changes(&server.sam, &cursor).await;
+    assert_eq!(changes.last().unwrap()["access"], "viewer");
 }
 
 #[tokio::test]

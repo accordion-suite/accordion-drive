@@ -24,6 +24,8 @@ use crate::api::{FoundView, ItemView};
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Level {
     Viewer,
+    /// Comments where the file's app has comments, such as Docs.
+    Commenter,
     Editor,
 }
 
@@ -31,6 +33,7 @@ impl From<Level> for ShareLevel {
     fn from(level: Level) -> Self {
         match level {
             Level::Viewer => Self::Viewer,
+            Level::Commenter => Self::Commenter,
             Level::Editor => Self::Editor,
         }
     }
@@ -40,6 +43,7 @@ impl From<ShareLevel> for Level {
     fn from(level: ShareLevel) -> Self {
         match level {
             ShareLevel::Viewer => Self::Viewer,
+            ShareLevel::Commenter => Self::Commenter,
             ShareLevel::Editor => Self::Editor,
         }
     }

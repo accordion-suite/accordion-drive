@@ -41,9 +41,10 @@ pub struct Server {
     pub imports: Imports,
     pub alex: Person,
     pub sam: Person,
-    /// Two more, for sharing.
+    /// Three more, for sharing.
     pub kim: Person,
     pub lee: Person,
+    pub ray: Person,
 }
 
 pub struct Person {
@@ -180,6 +181,7 @@ pub async fn start() -> Server {
         sam: person(&identity, "sam").await,
         kim: person(&identity, "kim").await,
         lee: person(&identity, "lee").await,
+        ray: person(&identity, "ray").await,
         _dir: dir,
         _stop: stop,
         router,

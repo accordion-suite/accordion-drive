@@ -35,7 +35,8 @@ pub(crate) struct SyncItemView {
     created_at: String,
     modified_at: String,
     /// "owner", "editor", or "viewer". A device keeps what a viewer has
-    /// read-only.
+    /// read-only. A commenter can't change files either, and devices don't
+    /// know the level, so they're told "viewer".
     access: &'static str,
     /// Everything inside changed for the person too, so the device lists
     /// it again with `/sync/folders/{id}`.
@@ -64,7 +65,10 @@ impl From<SyncItem> for SyncItemView {
             sha256: blob.map(|blob| blob.hash.to_hex()),
             created_at: item.created_at,
             modified_at: item.modified_at,
-            access: access_name(entry.access),
+            access: match entry.access {
+                Access::Commenter => access_name(Access::Viewer),
+                access => access_name(access),
+            },
             whole: entry.whole,
             place: item.place,
         }

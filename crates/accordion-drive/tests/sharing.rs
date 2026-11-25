@@ -105,7 +105,11 @@ async fn files(server: &Server, n: usize) -> Fixture {
     let upload = id(server
         .api(alex, "POST", "/uploads", Some(json!({ "size": 2 })))
         .await);
-    for (person, level) in [(&server.sam, "editor"), (&server.kim, "viewer")] {
+    for (person, level) in [
+        (&server.sam, "editor"),
+        (&server.kim, "viewer"),
+        (&server.ray, "commenter"),
+    ] {
         assert_eq!(
             share(server, &holiday, person, level).await.status,
             StatusCode::OK
@@ -486,6 +490,9 @@ async fn every_address_checks_access() {
         let people = [
             ("lee", &server.lee, None),
             ("kim", &server.kim, Some(Needs::Viewer)),
+            // Drive has no comments, so a commenter may do what a viewer
+            // may.
+            ("ray", &server.ray, Some(Needs::Viewer)),
             ("sam", &server.sam, Some(Needs::Editor)),
             ("alex", &server.alex, Some(Needs::OwnerAlone)),
         ];
@@ -562,9 +569,12 @@ async fn shares_and_lists_whats_shared() {
         people,
         [
             (json!("sam"), json!("editor")),
-            (json!("kim"), json!("viewer"))
+            (json!("kim"), json!("viewer")),
+            (json!("ray"), json!("commenter"))
         ]
     );
+    let rays = s.api(&s.ray, "GET", "/shared", None).await.json();
+    assert_eq!(rays[0]["access"], "commenter");
 
     // Alex sees which of their items are shared.
     let mine = s

@@ -8,7 +8,7 @@ This repo is part of [Accordion](https://github.com/accordion-suite/accordion), 
 
 Drive is a library crate, `accordion-drive`, that the server in the `accordion` repo builds in. It implements the `Module` trait from `accordion-module` ([decision 7](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0007-module-interface.md)).
 
-Drive keeps no files of its own. Core's storage service holds every file, version, and the trash ([decision 6](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0006-file-storage.md)), and Drive is how people reach them. People see their own files and what others shared with them as viewers or editors. Core decides what each person may do with each item, and every address asks it ([decision 16](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0016-sharing.md)).
+Drive keeps no files of its own. Core's storage service holds every file, version, and the trash ([decision 6](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0006-file-storage.md)), and Drive is how people reach them. People see their own files and what others shared with them as viewers, commenters, or editors. A commenter can comment on a document in Docs, and is a viewer everywhere else; sync tells devices "viewer". Core decides what each person may do with each item, and every address asks it ([decision 16](https://github.com/accordion-suite/accordion/blob/main/docs/decisions/0016-sharing.md)).
 
 | Path | What it's for | How it signs in |
 |---|---|---|
