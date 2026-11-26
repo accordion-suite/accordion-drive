@@ -240,9 +240,13 @@ pub(crate) async fn notifications(
             folder,
             event.at.get(..10).map(str::to_owned),
         );
-        // Each reminder is its own, with its own snooze and done.
+        // Each reminder is its own, with its own snooze and done, and each
+        // comment someone hears about leads to its own thread.
         if folder.is_some()
-            && event.action != Action::ReminderDue
+            && !matches!(
+                event.action,
+                Action::ReminderDue | Action::Mentioned | Action::Replied
+            )
             && last_key.as_ref() == Some(&key)
             && let Some(group) = views.last_mut()
         {

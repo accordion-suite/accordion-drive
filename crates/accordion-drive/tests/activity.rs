@@ -271,3 +271,51 @@ async fn each_reminder_is_a_notification_of_its_own() {
     assert_eq!(reminders[0]["details"]["local"], "2026-11-20T09:00");
     assert_eq!(reminders[1]["count"], 1);
 }
+
+#[tokio::test]
+async fn each_mention_is_a_notification_of_its_own() {
+    use accordion_core::events::{Action, Actor, NewEvent, Via};
+    use accordion_types::ItemId;
+
+    let server = start().await;
+    let (alex, sam) = (&server.alex, &server.sam);
+    let top = top(&server, alex).await;
+    let id: ItemId = put_file(&server, alex, &top, "Plan.html")
+        .await
+        .parse()
+        .unwrap();
+    for (action, thread) in [
+        (Action::Mentioned, "one"),
+        (Action::Mentioned, "two"),
+        (Action::Replied, "three"),
+        (Action::Replied, "four"),
+    ] {
+        server
+            .events
+            .record(
+                Actor::person(sam.id, Via::Web),
+                NewEvent::about(action, id, alex.id)
+                    .other(alex.id)
+                    .details(json!({"thread": thread, "comment": "c", "text": "Look"})),
+            )
+            .await
+            .unwrap();
+    }
+    let alexs = ok(server.api(alex, "GET", "/notifications", None).await);
+    let threads: Vec<&Value> = alexs["notifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|each| each["count"] == 1)
+        .map(|each| &each["details"]["thread"])
+        .collect();
+    assert_eq!(
+        threads,
+        [
+            &json!("four"),
+            &json!("three"),
+            &json!("two"),
+            &json!("one")
+        ]
+    );
+}
