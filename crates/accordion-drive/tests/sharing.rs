@@ -303,6 +303,19 @@ fn cases() -> Vec<Case> {
             Editor,
             |f| format!("/items/{}/versions/{}/restore", f.photo, f.first_version)
         ),
+        case!(
+            "PUT",
+            "/items/{id}/versions/{version}/name",
+            Editor,
+            |f| format!("/items/{}/versions/{}/name", f.photo, f.first_version),
+            Some(json!({ "name": "First" }))
+        ),
+        case!(
+            "DELETE",
+            "/items/{id}/versions/{version}/name",
+            Editor,
+            |f| format!("/items/{}/versions/{}/name", f.photo, f.first_version)
+        ),
         case!("GET", "/items/{id}/shares", Owner, |f| format!(
             "/items/{}/shares",
             f.holiday

@@ -8,6 +8,7 @@
 //! names of the folders it's in, starting from the shared folder for items
 //! someone else owns.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::ops::Range;
@@ -102,6 +103,10 @@ pub(crate) fn routes(state: DriveState) -> Router {
         .route(
             "/items/{id}/versions/{version}/restore",
             post(restore_version),
+        )
+        .route(
+            "/items/{id}/versions/{version}/name",
+            put(name_version).delete(unname_version),
         )
         .route("/trash", get(trash).delete(empty_trash))
         .route("/trash/{id}", delete(delete_forever))
@@ -476,17 +481,52 @@ struct VersionView {
     size: u64,
     sha256: String,
     created_at: String,
+    /// The name someone gave it, which keeps it past the retention period.
+    name: Option<String>,
+    /// The people whose changes went into it, in the order they first did.
+    people: Vec<VersionPerson>,
 }
 
-impl From<Version> for VersionView {
-    fn from(version: Version) -> Self {
-        Self {
-            id: version.id,
-            number: version.number,
-            size: version.blob.size,
-            sha256: version.blob.hash.to_hex(),
-            created_at: version.created_at,
+#[derive(Clone, Serialize)]
+struct VersionPerson {
+    user: UserId,
+    display_name: String,
+}
+
+impl DriveState {
+    /// The versions as the web app shows them, with people's names looked
+    /// up once each.
+    async fn version_views(&self, versions: Vec<Version>) -> Result<Vec<VersionView>, ApiError> {
+        let mut names: HashMap<UserId, Option<VersionPerson>> = HashMap::new();
+        let mut views = Vec::with_capacity(versions.len());
+        for version in versions {
+            let mut people = Vec::with_capacity(version.people.len());
+            for user in version.people {
+                let person = match names.entry(user) {
+                    Entry::Occupied(known) => known.get().clone(),
+                    Entry::Vacant(new) => {
+                        let found = self.identity.user(user).await?;
+                        new.insert(found.map(|user| VersionPerson {
+                            user: user.id,
+                            display_name: user.display_name,
+                        }))
+                        .clone()
+                    }
+                };
+                // An account being deleted is left out.
+                people.extend(person);
+            }
+            views.push(VersionView {
+                id: version.id,
+                number: version.number,
+                size: version.blob.size,
+                sha256: version.blob.hash.to_hex(),
+                created_at: version.created_at,
+                name: version.name,
+                people,
+            });
         }
+        Ok(views)
     }
 }
 
@@ -1843,7 +1883,46 @@ async fn versions(
 ) -> Result<Json<Vec<VersionView>>, ApiError> {
     state.reach(me.user.id, id, Access::Editor).await?;
     let versions = state.storage.versions(id).await?;
-    Ok(Json(versions.into_iter().map(VersionView::from).collect()))
+    Ok(Json(state.version_views(versions).await?))
+}
+
+#[derive(Deserialize)]
+struct VersionName {
+    name: String,
+}
+
+/// `PUT /items/{id}/versions/{version}/name`: names a version, which keeps
+/// it past the retention period (decision 30). An empty name removes it.
+async fn name_version(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path((id, version)): Path<(ItemId, VersionId)>,
+    Json(body): Json<VersionName>,
+) -> Result<Json<VersionView>, ApiError> {
+    named(&state, me.user.id, id, version, Some(&body.name)).await
+}
+
+/// `DELETE /items/{id}/versions/{version}/name`: removes a version's name,
+/// so it expires on the usual schedule.
+async fn unname_version(
+    State(state): State<DriveState>,
+    Authenticated(me): Authenticated,
+    Path((id, version)): Path<(ItemId, VersionId)>,
+) -> Result<Json<VersionView>, ApiError> {
+    named(&state, me.user.id, id, version, None).await
+}
+
+async fn named(
+    state: &DriveState,
+    me: UserId,
+    id: ItemId,
+    version: VersionId,
+    name: Option<&str>,
+) -> Result<Json<VersionView>, ApiError> {
+    state.reach(me, id, Access::Editor).await?;
+    let version = state.storage.name_version(id, version, name).await?;
+    let mut views = state.version_views(vec![version]).await?;
+    Ok(Json(views.remove(0)))
 }
 
 /// `GET /items/{id}/versions/{version}/content`: downloads an older version.

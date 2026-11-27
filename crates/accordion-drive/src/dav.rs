@@ -350,6 +350,7 @@ fn fs_error(err: storage::Error) -> FsError {
         | ShareWithOwner
         | ShareTopFolder
         | InvalidRetention
+        | InvalidVersionName
         | InTrash
         | NotInTrash
         | Changed

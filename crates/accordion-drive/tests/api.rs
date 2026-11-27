@@ -241,7 +241,44 @@ async fn keeps_versions() {
         .json();
     assert_eq!(versions.as_array().unwrap().len(), 2);
     assert_eq!(versions[0]["number"], 2);
+    assert_eq!(versions[0]["name"], serde_json::Value::Null);
+    assert_eq!(
+        versions[0]["people"],
+        json!([{ "user": alex.id, "display_name": "alex" }])
+    );
     let first = versions[1]["id"].as_str().unwrap();
+
+    // Naming a version, then removing the name.
+    let named = server
+        .api(
+            alex,
+            "PUT",
+            &format!("/items/{file}/versions/{first}/name"),
+            Some(json!({ "name": " First draft " })),
+        )
+        .await
+        .json();
+    assert_eq!(named["name"], "First draft");
+    assert_eq!(named["number"], 1);
+    let long = server
+        .api(
+            alex,
+            "PUT",
+            &format!("/items/{file}/versions/{first}/name"),
+            Some(json!({ "name": "x".repeat(101) })),
+        )
+        .await;
+    assert_eq!(long.status, StatusCode::BAD_REQUEST);
+    let unnamed = server
+        .api(
+            alex,
+            "DELETE",
+            &format!("/items/{file}/versions/{first}/name"),
+            None,
+        )
+        .await
+        .json();
+    assert_eq!(unnamed["name"], serde_json::Value::Null);
 
     let old = server
         .api(
